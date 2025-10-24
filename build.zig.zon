@@ -1,0 +1,14 @@
+.{
+    .name = .tls,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .fingerprint = 0xacfd1db31a32a932,
+    .dependencies = .{},
+    .paths = .{
+        "README.md",
+        "LICENSE",
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
