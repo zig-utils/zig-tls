@@ -295,7 +295,7 @@ pub const CertificateBuilder = struct {
     }
 };
 
-fn SchemeEcdsa(comptime scheme: proto.SignatureScheme) type {
+pub fn SchemeEcdsa(comptime scheme: proto.SignatureScheme) type {
     return switch (scheme) {
         .ecdsa_secp256r1_sha256 => EcdsaP256Sha256,
         .ecdsa_secp384r1_sha384 => EcdsaP384Sha384,
@@ -447,7 +447,7 @@ pub const CertificateParser = struct {
     }
 };
 
-fn SchemeHash(comptime scheme: proto.SignatureScheme) type {
+pub fn SchemeHash(comptime scheme: proto.SignatureScheme) type {
     const Sha256 = crypto.hash.sha2.Sha256;
     const Sha384 = crypto.hash.sha2.Sha384;
     const Sha512 = crypto.hash.sha2.Sha512;

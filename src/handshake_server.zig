@@ -35,8 +35,12 @@ pub const Options = struct {
     /// Client certificate will be verified with root_ca certificates.
     client_auth: ?ClientAuth = null,
 
-    /// List of supported tls 1.3 cipher suites
-    cipher_suites: []const CipherSuite = cipher_suites.tls13,
+    /// List of supported cipher suites (TLS 1.3 and/or TLS 1.2)
+    /// Default includes both TLS 1.3 and TLS 1.2 secure ciphers for maximum compatibility.
+    cipher_suites: []const CipherSuite = cipher_suites.all,
+
+    /// Named groups (elliptic curves) to support for key exchange
+    named_groups: []const proto.NamedGroup = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 },
 };
 
 pub const ClientAuth = struct {
@@ -80,6 +84,12 @@ pub const Handshake = struct {
     cipher: Cipher = undefined,
     transcript: Transcript = .{},
 
+    // TLS 1.2 specific fields
+    tls_version: proto.Version = .tls_1_3,
+    master_secret: [48]u8 = undefined,
+    key_material: [48 * 4]u8 = undefined,
+    dh_kp: DhKeyPair = undefined,
+
     const Self = @This();
 
     fn writeAlert(h: *Self, cph: ?*Cipher, err: anyerror) !void {
@@ -97,25 +107,42 @@ pub const Handshake = struct {
     pub fn handshake(h: *Self, opt: Options) !Cipher {
         h.initKeys(opt);
 
-        h.readClientHello(opt.cipher_suites) catch |err| {
+        h.readClientHello(opt.cipher_suites, opt.named_groups) catch |err| {
             try h.writeAlert(null, err);
             return err;
         };
         h.transcript.use(h.cipher_suite.hash());
 
-        h.serverFlight(opt) catch |err| {
-            try h.writeAlert(null, err);
-            return err;
-        };
-        try h.output.flush();
+        if (h.tls_version == .tls_1_3) {
+            // TLS 1.3 handshake
+            h.serverFlight(opt) catch |err| {
+                try h.writeAlert(null, err);
+                return err;
+            };
+            try h.output.flush();
 
-        h.clientFlight2(opt) catch |err| {
-            // Alert received from client
-            if (!mem.startsWith(u8, @errorName(err), "TlsAlert")) {
-                try h.writeAlert(&h.cipher, err);
-            }
-            return err;
-        };
+            h.clientFlight2(opt) catch |err| {
+                // Alert received from client
+                if (!mem.startsWith(u8, @errorName(err), "TlsAlert")) {
+                    try h.writeAlert(&h.cipher, err);
+                }
+                return err;
+            };
+        } else {
+            // TLS 1.2 handshake
+            h.serverFlightTls12(opt) catch |err| {
+                try h.writeAlert(null, err);
+                return err;
+            };
+            try h.output.flush();
+
+            h.clientFlight2Tls12(opt) catch |err| {
+                if (!mem.startsWith(u8, @errorName(err), "TlsAlert")) {
+                    try h.writeAlert(if (h.cipher_suite.validate() == null) &h.cipher else null, err);
+                }
+                return err;
+            };
+        }
         return h.cipher;
     }
 
@@ -125,11 +152,236 @@ pub const Handshake = struct {
             // required signature scheme in client hello
             h.signature_scheme = a.key.signature_scheme;
         }
+        // Initialize DH key pair for key exchange (used in TLS 1.2 ECDHE)
+        var seed: [DhKeyPair.seed_len]u8 = undefined;
+        crypto.random.bytes(&seed);
+        h.dh_kp = DhKeyPair.init(seed, opt.named_groups) catch unreachable;
     }
 
     fn clientFlight1(h: *Self, opt: Options) !void {
-        try h.readClientHello(opt.cipher_suites);
+        try h.readClientHello(opt.cipher_suites, opt.named_groups);
         h.transcript.use(h.cipher_suite.hash());
+    }
+
+    /// TLS 1.2 server flight: ServerHello, Certificate, ServerKeyExchange, ServerHelloDone
+    fn serverFlightTls12(h: *Self, opt: Options) !void {
+        var w: record.Writer = .initFromIo(h.output);
+
+        // Generate server's DH public key
+        h.server_pub_key = try common.dupe(&h.server_pub_key_buf, try h.dh_kp.publicKey(h.named_group));
+
+        // ServerHello
+        {
+            const hello = try h.makeServerHelloTls12(&w);
+            h.transcript.update(hello[record.header_len..]);
+        }
+
+        // Certificate (if auth is enabled)
+        if (opt.auth) |auth| {
+            const cb = CertificateBuilder{
+                .cert_key_pair = auth,
+                .transcript = &h.transcript,
+                .tls_version = .tls_1_2,
+                .side = .server,
+            };
+            var hw = try w.writerAdvance(record.header_len);
+            try cb.makeCertificate(&hw);
+            h.transcript.update(hw.buffered());
+            try w.record(.handshake, hw.buffered());
+        }
+
+        // ServerKeyExchange (for ECDHE cipher suites)
+        if (h.cipher_suite.keyExchange() == .ecdhe) {
+            if (opt.auth) |auth| {
+                var hw = try w.writerAdvance(record.header_len);
+                try h.makeServerKeyExchange(&hw, auth);
+                h.transcript.update(hw.buffered());
+                try w.record(.handshake, hw.buffered());
+            }
+        }
+
+        // ServerHelloDone
+        {
+            var hw = try w.writerAdvance(record.header_len);
+            try hw.handshakeRecordHeader(.server_hello_done, 0);
+            h.transcript.update(hw.buffered());
+            try w.record(.handshake, hw.buffered());
+        }
+
+        h.output.advance(w.buffered().len);
+    }
+
+    fn makeServerHelloTls12(h: *Self, w: *record.Writer) ![]const u8 {
+        const header_pos = try w.skip(9);
+
+        try w.enumValue(proto.Version.tls_1_2);
+        try w.slice(&h.server_random);
+        {
+            try w.int(u8, h.legacy_session_id.len);
+            if (h.legacy_session_id.len > 0) try w.slice(h.legacy_session_id);
+        }
+        try w.enumValue(h.cipher_suite);
+        try w.slice(&[_]u8{0}); // compression method (null)
+
+        // No extensions for TLS 1.2 ServerHello (basic)
+        // Extensions length = 0
+        try w.int(u16, 0);
+
+        var hw = w.writerAt(header_pos);
+        try hw.recordHeader(.handshake, w.pos() - 5);
+        try hw.handshakeRecordHeader(.server_hello, w.pos() - 9);
+
+        return w.buffered();
+    }
+
+    fn makeServerKeyExchange(h: *Self, hw: *record.Writer, auth: *CertKeyPair) !void {
+        const content_start = hw.pos();
+        // Skip handshake header, write it at end
+        _ = try hw.skip(4);
+
+        // ECParameters - named_curve type + curve ID
+        try hw.int(u8, @intFromEnum(proto.Curve.named_curve));
+        try hw.enumValue(h.named_group);
+
+        // ECPoint - public key
+        const pub_key = h.server_pub_key;
+        try hw.int(u8, pub_key.len);
+        try hw.slice(pub_key);
+
+        // Signature - sign (client_random + server_random + ec_params + ec_point)
+        const params_end = hw.pos();
+        const params = hw.buffered()[content_start + 4 .. params_end];
+
+        // Build data to sign: client_random || server_random || ec_params
+        var sign_buf: [32 + 32 + 256]u8 = undefined;
+        @memcpy(sign_buf[0..32], &h.client_random);
+        @memcpy(sign_buf[32..64], &h.server_random);
+        @memcpy(sign_buf[64 .. 64 + params.len], params);
+        const sign_data = sign_buf[0 .. 64 + params.len];
+
+        // Sign the data using the appropriate signing method based on key type
+        const signature_scheme = auth.key.signature_scheme;
+        try hw.enumValue(signature_scheme);
+
+        const signature = switch (signature_scheme) {
+            inline .ecdsa_secp256r1_sha256,
+            .ecdsa_secp384r1_sha384,
+            => |comptime_scheme| brk: {
+                const Ecdsa = common.SchemeEcdsa(comptime_scheme);
+                const key_pair = switch (comptime_scheme) {
+                    .ecdsa_secp256r1_sha256 => auth.ecdsa_key_pair.?.ecdsa_secp256r1_sha256,
+                    .ecdsa_secp384r1_sha384 => auth.ecdsa_key_pair.?.ecdsa_secp384r1_sha384,
+                    else => unreachable,
+                };
+                var signer = try key_pair.signer(null);
+                signer.update(sign_data);
+                const sig = try signer.finalize();
+                var buf: [Ecdsa.Signature.der_encoded_length_max]u8 = undefined;
+                break :brk sig.toDer(&buf);
+            },
+            inline .rsa_pss_rsae_sha256,
+            .rsa_pss_rsae_sha384,
+            .rsa_pss_rsae_sha512,
+            => |comptime_scheme| brk: {
+                const Hash = common.SchemeHash(comptime_scheme);
+                var signer = try auth.key.key.rsa.signerOaep(Hash, null);
+                signer.update(sign_data);
+                var buf: [512]u8 = undefined;
+                const sig = try signer.finalize(&buf);
+                break :brk sig.bytes;
+            },
+            else => return error.TlsUnknownSignatureScheme,
+        };
+
+        try hw.int(u16, signature.len);
+        try hw.slice(signature);
+
+        // Write handshake header
+        var header_w = hw.writerAt(content_start);
+        try header_w.handshakeRecordHeader(.server_key_exchange, hw.pos() - content_start - 4);
+    }
+
+    /// TLS 1.2 client flight 2: ClientKeyExchange, ChangeCipherSpec, Finished
+    fn clientFlight2Tls12(h: *Self, _: Options) !void {
+        // Read ClientKeyExchange
+        {
+            var d = try Record.decoder(h.input);
+            try d.expectContentType(.handshake);
+            h.transcript.update(d.payload);
+
+            const handshake_type = try d.decode(proto.Handshake);
+            if (handshake_type != .client_key_exchange) return error.TlsUnexpectedMessage;
+            const length = try d.decode(u24);
+
+            // For ECDHE, client sends its public key
+            if (h.cipher_suite.keyExchange() == .ecdhe) {
+                const client_pub_key_len = try d.decode(u8);
+                if (client_pub_key_len != length - 1) return error.TlsDecodeError;
+                h.client_pub_key = try common.dupe(&h.client_pub_key_buf, try d.slice(client_pub_key_len));
+            } else {
+                // RSA key exchange - skip for now
+                try d.skip(length);
+            }
+        }
+
+        // Generate pre-master secret and derive keys
+        if (h.cipher_suite.keyExchange() == .ecdhe) {
+            const pre_master_secret = try h.dh_kp.sharedKey(h.named_group, h.client_pub_key);
+            h.transcript.masterSecret(&h.master_secret, pre_master_secret, h.client_random, h.server_random);
+            h.transcript.keyMaterial(&h.key_material, &h.master_secret, h.client_random, h.server_random);
+        }
+
+        // Initialize cipher for decryption
+        h.cipher = try Cipher.initTls12(h.cipher_suite, &h.key_material, .server);
+
+        // Read ChangeCipherSpec
+        {
+            var d = try Record.decoder(h.input);
+            try d.expectContentType(.change_cipher_spec);
+            if (d.payload.len != 1 or d.payload[0] != 1) return error.TlsUnexpectedMessage;
+        }
+
+        // Read encrypted Finished
+        {
+            const rec = try Record.read(h.input);
+            if (rec.content_type != .application_data) return error.TlsUnexpectedMessage;
+
+            var cleartext_buf: [128]u8 = undefined;
+            const content_type, const cleartext = try h.cipher.decrypt(&cleartext_buf, rec);
+            if (content_type != .handshake) return error.TlsUnexpectedMessage;
+
+            // Parse Finished message
+            var d = record.Decoder.init(content_type, cleartext);
+            const handshake_type = try d.decode(proto.Handshake);
+            if (handshake_type != .finished) return error.TlsUnexpectedMessage;
+            const length = try d.decode(u24);
+            if (length != 12) return error.TlsDecodeError;
+
+            const client_verify_data = try d.slice(12);
+            const expected_verify_data = h.transcript.clientFinishedTls12(&h.master_secret);
+            if (!mem.eql(u8, client_verify_data, &expected_verify_data))
+                return error.TlsDecryptError;
+
+            // Update transcript with Finished message
+            h.transcript.update(cleartext);
+        }
+
+        // Send ChangeCipherSpec and Finished
+        {
+            var w: record.Writer = .initFromIo(h.output);
+
+            // ChangeCipherSpec
+            try w.record(.change_cipher_spec, &[_]u8{1});
+
+            // Finished (encrypted)
+            const server_finished = &record.handshakeHeader(.finished, 12) ++
+                h.transcript.serverFinishedTls12(&h.master_secret);
+            const ciphertext = try h.cipher.encrypt(w.unused(), .handshake, server_finished);
+            w.advance(ciphertext.len);
+
+            h.output.advance(w.buffered().len);
+            try h.output.flush();
+        }
     }
 
     fn clientFlight2(h: *Self, opt: Options) !void {
@@ -353,7 +605,7 @@ pub const Handshake = struct {
         try hw.int(u16, ext_len); // extensions length
     }
 
-    fn readClientHello(h: *Self, supported_cipher_suites: []const CipherSuite) !void {
+    fn readClientHello(h: *Self, supported_cipher_suites: []const CipherSuite, server_named_groups: []const proto.NamedGroup) !void {
         var d = try Record.decoder(h.input);
         if (d.payload.len > max_cleartext_len) return error.TlsRecordOverflow;
         try d.expectContentType(.handshake);
@@ -386,6 +638,10 @@ pub const Handshake = struct {
         try d.skip(2); // compression methods
 
         var key_share_received = false;
+        var tls_1_3_supported = false;
+        var supported_groups_buf: [16]proto.NamedGroup = undefined;
+        var supported_groups_len: usize = 0;
+
         // extensions
         const extensions_end_idx = try d.decode(u16) + d.idx;
         while (d.idx < extensions_end_idx) {
@@ -394,14 +650,13 @@ pub const Handshake = struct {
 
             switch (extension_type) {
                 .supported_versions => {
-                    var tls_1_3_supported = false;
                     const end_idx = try d.decode(u8) + d.idx;
                     while (d.idx < end_idx) {
-                        if (try d.decode(proto.Version) == proto.Version.tls_1_3) {
+                        const version = try d.decode(proto.Version);
+                        if (version == proto.Version.tls_1_3) {
                             tls_1_3_supported = true;
                         }
                     }
-                    if (!tls_1_3_supported) return error.TlsProtocolVersion;
                 },
                 .key_share => {
                     if (extension_len == 0) return error.TlsDecodeError;
@@ -438,7 +693,13 @@ pub const Handshake = struct {
                             0x001a...0x001c,
                             0xff01...0xff02,
                             => return error.TlsIllegalParameter,
-                            else => {},
+                            else => {
+                                // Store supported groups for TLS 1.2 fallback
+                                if (supported_groups_len < supported_groups_buf.len) {
+                                    supported_groups_buf[supported_groups_len] = named_group;
+                                    supported_groups_len += 1;
+                                }
+                            },
                         }
                     }
                 },
@@ -462,8 +723,32 @@ pub const Handshake = struct {
                 },
             }
         }
-        if (!key_share_received) return error.TlsMissingExtension;
-        if (@intFromEnum(h.named_group) == 0) return error.TlsIllegalParameter;
+
+        // Determine TLS version based on client capabilities
+        if (tls_1_3_supported and key_share_received) {
+            // TLS 1.3 handshake
+            h.tls_version = .tls_1_3;
+            if (@intFromEnum(h.named_group) == 0) return error.TlsIllegalParameter;
+        } else {
+            // TLS 1.2 handshake - need to select named group from supported_groups
+            h.tls_version = .tls_1_2;
+
+            // For TLS 1.2 ECDHE, select a named group from supported_groups extension
+            if (h.cipher_suite.keyExchange() == .ecdhe) {
+                // Find first matching named group between server and client
+                const client_groups = supported_groups_buf[0..supported_groups_len];
+                for (server_named_groups) |server_ng| {
+                    for (client_groups) |client_ng| {
+                        if (server_ng == client_ng) {
+                            h.named_group = server_ng;
+                            break;
+                        }
+                    }
+                    if (@intFromEnum(h.named_group) != 0) break;
+                }
+                if (@intFromEnum(h.named_group) == 0) return error.TlsIllegalParameter;
+            }
+        }
     }
 };
 
@@ -478,7 +763,7 @@ test "read client hello" {
         .output = undefined,
     };
     h.signature_scheme = .ecdsa_secp521r1_sha512; // this must be supported in signature_algorithms extension
-    try h.readClientHello(cipher_suites.tls13);
+    try h.readClientHello(cipher_suites.tls13, &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 });
 
     try testing.expectEqual(CipherSuite.AES_256_GCM_SHA384, h.cipher_suite);
     try testing.expectEqual(.x25519, h.named_group);
@@ -571,7 +856,12 @@ pub const NonBlock = struct {
                 self.state.next();
             },
             .server_flight => {
-                try self.inner.clientFlight2(self.opt);
+                // Use appropriate client flight based on TLS version
+                if (self.inner.tls_version == .tls_1_2) {
+                    try self.inner.clientFlight2Tls12(self.opt);
+                } else {
+                    try self.inner.clientFlight2(self.opt);
+                }
                 self.state.next();
             },
             else => return,
@@ -634,7 +924,12 @@ pub const NonBlock = struct {
                     // recv buffer is fully consumed, same buffer can be used for write
                     return error.TlsUnexpectedMessage;
                 }
-                try self.inner.serverFlight(self.opt);
+                // Use appropriate server flight based on TLS version
+                if (self.inner.tls_version == .tls_1_2) {
+                    try self.inner.serverFlightTls12(self.opt);
+                } else {
+                    try self.inner.serverFlight(self.opt);
+                }
                 self.state.next();
             },
             .client_flight_2 => {
