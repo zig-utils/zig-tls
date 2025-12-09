@@ -17,11 +17,17 @@ key: union {
 
 const PrivateKey = @This();
 
-pub fn fromFile(gpa: Allocator, file: std.fs.File) !PrivateKey {
-    var file_reader = file.reader(&.{});
-    const buf = try file_reader.interface.allocRemaining(gpa, .limited(1024 * 1024));
-    defer gpa.free(buf);
-    return try parsePem(buf);
+pub fn fromFile(_: Allocator, file: std.fs.File) !PrivateKey {
+    // Read file using posix since Zig 0.16 File.reader requires Io context
+    const fd = file.handle;
+    var buf: [8192]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.read(fd, buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    return try parsePem(buf[0..total]);
 }
 
 pub fn parsePem(buf: []const u8) !PrivateKey {

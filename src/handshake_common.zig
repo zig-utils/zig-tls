@@ -1,8 +1,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const mem = std.mem;
+const fs = std.fs;
 const crypto = std.crypto;
 const Certificate = crypto.Certificate;
+const Io = std.Io;
 
 const Transcript = @import("transcript.zig").Transcript;
 const PrivateKey = @import("PrivateKey.zig");
@@ -69,13 +71,72 @@ pub const CertKeyPair = struct {
 
     pub fn fromFilePathAbsolute(
         allocator: mem.Allocator,
+        io: Io,
         cert_path: []const u8,
         key_path: []const u8,
     ) !CertKeyPair {
         var bundle: cert.Bundle = .{};
-        try bundle.addCertsFromFilePathAbsolute(allocator, cert_path);
+        const now = Io.Timestamp.now(io);
+        try bundle.addCertsFromFilePathAbsolute(allocator, io, now, cert_path);
 
-        const key_file = try std.fs.openFileAbsolute(key_path, .{});
+        const key_file = try fs.openFileAbsolute(key_path, .{});
+        defer key_file.close();
+        const key = try PrivateKey.fromFile(allocator, key_file);
+
+        return .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+    }
+
+    /// Sync version that doesn't require Io - reads certs directly from PEM files
+    pub fn fromFilePathAbsoluteSync(
+        allocator: mem.Allocator,
+        cert_path: []const u8,
+        key_path: []const u8,
+    ) !CertKeyPair {
+        // Read certificate file using posix
+        const cert_fd = try std.posix.open(cert_path, .{}, 0);
+        defer std.posix.close(cert_fd);
+
+        // Read cert data manually using posix read
+        var cert_buf: [32768]u8 = undefined;
+        var cert_len: usize = 0;
+        while (cert_len < cert_buf.len) {
+            const n = std.posix.read(cert_fd, cert_buf[cert_len..]) catch break;
+            if (n == 0) break;
+            cert_len += n;
+        }
+
+        // Parse PEM certificates manually
+        var bundle: cert.Bundle = .{};
+        const pem_data = cert_buf[0..cert_len];
+
+        // Find and decode PEM blocks - add DER bytes directly to bundle
+        const base64_decoder = std.base64.standard.decoderWithIgnore(" \t\r\n");
+        var start: usize = 0;
+        while (std.mem.indexOfPos(u8, pem_data, start, "-----BEGIN CERTIFICATE-----")) |begin| {
+            const content_start = begin + 27; // Length of "-----BEGIN CERTIFICATE-----"
+            if (std.mem.indexOfPos(u8, pem_data, content_start, "-----END CERTIFICATE-----")) |end| {
+                const base64_data = pem_data[content_start..end];
+                const decoded_start: u32 = @intCast(bundle.bytes.items.len);
+                const dest_buf = bundle.bytes.addManyAsSlice(allocator, base64_decoder.calcSizeUpperBound(base64_data.len)) catch {
+                    start = end + 25;
+                    continue;
+                };
+                const decoded_len = base64_decoder.decode(dest_buf, base64_data) catch {
+                    bundle.bytes.items.len = decoded_start;
+                    start = end + 25;
+                    continue;
+                };
+                bundle.bytes.items.len = decoded_start + decoded_len;
+                // Parse and add to map
+                bundle.parseCert(allocator, decoded_start, 0) catch {
+                    bundle.bytes.items.len = decoded_start;
+                };
+                start = end + 25;
+            } else break;
+        }
+
+        // Read key file
+        const key_file = try fs.openFileAbsolute(key_path, .{});
         defer key_file.close();
         const key = try PrivateKey.fromFile(allocator, key_file);
 
@@ -258,7 +319,12 @@ pub const CertificateParser = struct {
 
     pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
         if (h.now_sec == 0) {
-            h.now_sec = std.time.timestamp();
+            // Zig 0.16 compatibility: use posix clock
+            if (std.posix.clock_gettime(.REALTIME)) |ts| {
+                h.now_sec = ts.sec;
+            } else |_| {
+                h.now_sec = 0;
+            }
         }
         if (tls_version == .tls_1_3) {
             const request_context = try d.decode(u8);

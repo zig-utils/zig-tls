@@ -72,13 +72,15 @@ inline fn streamToRaderWriter(stream: anytype) struct { *Io.Reader, *Io.Writer }
 
 pub const Cipher = @import("cipher.zig").Cipher;
 pub const config = struct {
-    const proto = @import("protocol.zig");
+    pub const proto = @import("protocol.zig");
     const common = @import("handshake_common.zig");
 
     pub const CipherSuite = @import("cipher.zig").CipherSuite;
     pub const PrivateKey = @import("PrivateKey.zig");
     pub const NamedGroup = proto.NamedGroup;
     pub const Version = proto.Version;
+    pub const ContentType = proto.ContentType;
+    pub const Record = @import("record.zig").Record;
     pub const cert = common.cert;
     pub const CertKeyPair = common.CertKeyPair;
 

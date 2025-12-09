@@ -2,8 +2,15 @@ const std = @import("std");
 const assert = std.debug.assert;
 const crypto = std.crypto;
 const mem = std.mem;
+const posix = std.posix;
 const Io = std.Io;
 const Certificate = crypto.Certificate;
+
+// Helper function for Zig 0.16 compatibility
+fn getMilliTimestamp() i64 {
+    const ts = posix.clock_gettime(.REALTIME) catch return 0;
+    return ts.sec * 1000 + @divFloor(ts.nsec, std.time.ns_per_ms);
+}
 
 const Cipher = @import("cipher.zig").Cipher;
 const CipherSuite = @import("cipher.zig").CipherSuite;
@@ -112,14 +119,14 @@ pub const Options = struct {
                     .identity = try d.slice(try d.decode(u16)),
                     .payload = payload,
                     .secret = secret,
-                    .created_at = std.time.milliTimestamp(),
+                    .created_at = getMilliTimestamp(),
                 };
             }
 
             /// Obfuscated age for pre shared extension in client hello message when
             /// using this ticket.
             pub fn obfuscatedAge(t: Ticket) u32 {
-                const age: u32 = @intCast(std.time.milliTimestamp() - t.created_at);
+                const age: u32 = @intCast(getMilliTimestamp() - t.created_at);
                 return t.age_add +% age;
             }
         };
