@@ -43,9 +43,13 @@ pub fn fileAppend(file_name: []const u8, label_: []const u8, client_random: []co
 }
 
 fn fileWrite(file_name: []const u8, line: []const u8) !void {
-    // Stubbed: std.fs file APIs removed in Zig 0.16, needs Io context
-    _ = file_name;
-    _ = line;
+    var path_buf: [std.posix.PATH_MAX]u8 = undefined;
+    if (file_name.len >= path_buf.len) return error.NameTooLong;
+    @memcpy(path_buf[0..file_name.len], file_name);
+    path_buf[file_name.len] = 0;
+    const fd = try std.posix.open(path_buf[0..file_name.len :0], .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o600);
+    defer std.posix.close(fd);
+    _ = try std.posix.write(fd, line);
 }
 
 pub fn formatLine(buf: []u8, label_: []const u8, client_random: []const u8, secret: []const u8) ![]const u8 {
