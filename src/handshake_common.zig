@@ -76,7 +76,7 @@ pub const CertKeyPair = struct {
         key_path: []const u8,
     ) !CertKeyPair {
         var bundle: cert.Bundle = .{};
-        const now = Io.Clock.real.now(io) catch Io.Timestamp.zero;
+        const now = Io.Clock.real.now(io);
         try bundle.addCertsFromFilePathAbsolute(allocator, io, now, cert_path);
 
         const key_file = try std.Io.Dir.openFileAbsolute(io, key_path, .{});
@@ -337,11 +337,9 @@ pub const CertificateParser = struct {
 
     pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
         if (h.now_sec == 0) {
-            // Zig 0.16 compatibility: use posix clock
-            if (std.posix.clock_gettime(.REALTIME)) |ts| {
+            var ts: std.c.timespec = undefined;
+            if (std.c.clock_gettime(.REALTIME, &ts) == 0) {
                 h.now_sec = ts.sec;
-            } else |_| {
-                h.now_sec = 0;
             }
         }
         if (tls_version == .tls_1_3) {
