@@ -8,7 +8,8 @@ const Certificate = crypto.Certificate;
 
 // Helper function for Zig 0.16 compatibility
 fn getMilliTimestamp() i64 {
-    const ts = posix.clock_gettime(.REALTIME) catch return 0;
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 0;
     return ts.sec * 1000 + @divFloor(ts.nsec, std.time.ns_per_ms);
 }
 
