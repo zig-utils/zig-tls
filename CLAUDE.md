@@ -2,7 +2,7 @@
 
 ## About
 
-TLS implementation built with Zig.
+zig-tls is a pure Zig TLS 1.3 implementation with no C dependencies, designed for SMTP and other protocols. It provides both client and server support, non-blocking I/O, STARTTLS for protocol upgrades, and certificate/private key management. Based on the tls.zig project by ianic.
 
 ## Linting
 
