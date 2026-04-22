@@ -113,7 +113,7 @@ test "nonblock handshake and connection" {
     // client/server handshake produces ciphers
     const cli_cipher, const srv_cipher = brk: {
         var cli = nonblock.Client.init(.{
-            .root_ca = .{},
+            .root_ca = .empty,
             .host = &.{},
             .insecure_skip_verify = true,
         });

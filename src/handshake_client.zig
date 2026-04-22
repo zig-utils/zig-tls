@@ -943,7 +943,7 @@ test "parse tls 1.2 server hello" {
     // Read cipher suite, named group, signature scheme, server random certificate public key
     // Verify host name, signature
     // Calculate key material
-    h.cert = .{ .host = "example.ulfheim.net", .skip_verify = true, .root_ca = .{} };
+    h.cert = .{ .host = "example.ulfheim.net", .skip_verify = true, .root_ca = .empty };
     try h.readServerFlight1();
     try testing.expectEqual(.ECDHE_RSA_WITH_AES_128_CBC_SHA, h.cipher_suite);
     try testing.expectEqual(.x25519, h.named_group.?);
@@ -969,11 +969,11 @@ test "verify google.com certificate" {
         .client_random = @embedFile("testdata/google.com/client_random").*,
     };
 
-    var ca_bundle: Certificate.Bundle = .{};
+    var ca_bundle: Certificate.Bundle = .empty;
     try ca_bundle.rescan(testing.allocator);
     defer ca_bundle.deinit(testing.allocator);
 
-    h.cert = .{ .host = "google.com", .skip_verify = true, .root_ca = .{}, .now_sec = 1714846451 };
+    h.cert = .{ .host = "google.com", .skip_verify = true, .root_ca = .empty, .now_sec = 1714846451 };
     try h.readServerFlight1();
     try h.verifyCertificateSignatureTls12();
 }
@@ -1067,7 +1067,7 @@ test "tls 1.3 process server flight" {
     };
     try initExampleHandshake(&h);
 
-    h.cert = .{ .host = "example.ulfheim.net", .skip_verify = true, .root_ca = .{} };
+    h.cert = .{ .host = "example.ulfheim.net", .skip_verify = true, .root_ca = .empty };
     try h.readEncryptedServerFlight1(false);
 
     { // application cipher keys calculation
@@ -1127,7 +1127,7 @@ test "create client hello" {
 
     try h.makeClientHello(.{
         .host = "google.com",
-        .root_ca = .{},
+        .root_ca = .empty,
         .cipher_suites = &[_]CipherSuite{CipherSuite.ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
         .named_groups = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 },
     }, null);
@@ -1141,7 +1141,7 @@ test "create client hello" {
 test "client hello size" {
     const opt: Options = .{
         .host = "some-host-name.net",
-        .root_ca = .{},
+        .root_ca = .empty,
         .cipher_suites = cipher_suites.all,
         //.named_groups = supported_named_groups,
     };
@@ -1317,7 +1317,7 @@ test "nonblock handshake" {
     var h = NonBlock.init(.{
         .host = "example.ulfheim.net",
         .insecure_skip_verify = true,
-        .root_ca = .{},
+        .root_ca = .empty,
         .cipher_suites = &[_]CipherSuite{CipherSuite.AES_256_GCM_SHA384},
         .named_groups = &[_]proto.NamedGroup{.x25519},
     });
