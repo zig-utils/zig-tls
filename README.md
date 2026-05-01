@@ -59,4 +59,4 @@ try tls_conn.write(data);
 
 ## License
 
-MIT - Based on https://github.com/ianic/tls.zig
+MIT - Based on <https://github.com/ianic/tls.zig>
