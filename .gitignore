@@ -5,3 +5,4 @@ zig-out/
 *.swo
 *~
 .DS_Store
+pantry
