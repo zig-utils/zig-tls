@@ -17,6 +17,11 @@ pub const output_buffer_len = @import("cipher.zig").max_encrypted_record_len; //
 
 pub const Connection = @import("connection.zig").Connection;
 
+/// Low-level RSA primitives (PKCS#1 v1.5 / PSS sign+verify, public/private key
+/// parsing incl. SPKI). Exposed so consumers can do RSA outside the TLS
+/// handshake — e.g. DKIM signing/verification.
+pub const rsa = @import("rsa/rsa.zig");
+
 const handshake = struct {
     const Client = @import("handshake_client.zig").Handshake;
     const Server = @import("handshake_server.zig").Handshake;
