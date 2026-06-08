@@ -244,6 +244,11 @@ pub fn Field(comptime params: FieldParams) type {
             return fe;
         }
 
+        /// Variable-time inverse for verification (Fermat).
+        pub fn invertVarTime(a: Fe) Fe {
+            return a.pow(u256, field_order - 2);
+        }
+
         /// Return true if the field element is a square.
         pub fn isSquare(x2: Fe) bool {
             if (field_order == 115792089210356248762697446949407573530086143415290314195533631308867097853951) {

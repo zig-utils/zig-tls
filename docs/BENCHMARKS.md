@@ -24,10 +24,10 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8530 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6550 /s** | ~6970 /s | ~0.94× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3890 /s** | — | — |
-| Transfer send AES-128-GCM (16 KiB) | **~8740 MB/s** | ~8780 MB/s | ~0.99× |
-| Transfer recv AES-128-GCM (16 KiB) | **~8430 MB/s** | ~8390 MB/s | **~1.01×** |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6320 /s** | ~6810 /s | ~0.93× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3840 /s** | — | — |
+| Transfer send AES-128-GCM (16 KiB) | **~8530 MB/s** | ~8570 MB/s | ~0.99× |
+| Transfer recv AES-128-GCM (16 KiB) | **~8020 MB/s** | ~8020 MB/s | **~1.00×** |
 | Transfer send AES-256-GCM (16 KiB) | **~7960 MB/s** | ~8070 MB/s | ~0.99× |
 | Transfer recv AES-256-GCM (16 KiB) | **~7710 MB/s** | ~7840 MB/s | ~0.98× |
 
@@ -41,9 +41,9 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | BoringSSL (~6% ahead on latest run) |
+| Cert handshake | BoringSSL (~7% ahead; ECDSA sign dominates) |
 | Transfer AES-128 send | Parity |
-| Transfer AES-128 recv | **zig-tls** (tag-mask cache) |
+| Transfer AES-128 recv | Parity |
 | Transfer AES-256 | BoringSSL (~1–2%) |
 
 ## Methodology
@@ -103,6 +103,10 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   `CertificateParser` so repeated `CertificateVerify` skips `precompute(p, 8)`.
 - **ECDSA scalar invert (verify):** variable-time Fermat `invertVarTime` uses hw
   `ordMul`/`ordSqr` instead of fiat divstep on the verify-only path.
+- **CertificateVerify sign path:** TLS 1.3 ECDSA signing uses incremental
+  `serverCertificateVerifyDigest` and `signatureToDerTls` (fixed 72-byte layout).
+- **ECDSA verify nistz split:** `mulDoubleBasePublic` uses `nistz mulBase` + cached
+  `pcMul` + one add when nistz is enabled; `affineCoordinatesVarTime` avoids CT field invert.
 - **TLS 1.3 GCM nonce cache:** `CachedAesGcm` reuses the counter=1 tag mask and counter=2
   CTR ivec per record nonce (bench transfer path uses a fixed nonce).
 - **Bedrock coord add/sub** (`p256_coord.zig`): BoringSSL no longer ships nistz

@@ -320,6 +320,15 @@ pub const P256 = struct {
         return ret;
     }
 
+    /// Variable-time affine conversion for signature verification.
+    pub fn affineCoordinatesVarTime(p: P256) AffineCoordinates {
+        const zinv = p.z.invertVarTime();
+        return .{
+            .x = p.x.mul(zinv),
+            .y = p.y.mul(zinv),
+        };
+    }
+
     /// Return true if both coordinate sets represent the same point.
     pub fn equivalent(a: P256, b: P256) bool {
         if (a.sub(b).rejectIdentity()) {
@@ -450,6 +459,12 @@ pub const P256 = struct {
         return pcMul(&pc, s, true);
     }
 
+    /// `mulPublic` using a precomputed width-8 table (verify path).
+    pub fn mulPublicCached(s_: [32]u8, endian: std.builtin.Endian, pc: *const [9]P256) IdentityElementError!P256 {
+        const s = if (endian == .little) s_ else Fe.orderSwap(s_);
+        return pcMul(pc, s, true);
+    }
+
     /// Double-base multiplication of public parameters - Compute (p1*s1)+(p2*s2) *IN VARIABLE TIME*
     /// This can be used for signature verification.
     pub fn mulDoubleBasePublic(
@@ -462,6 +477,20 @@ pub const P256 = struct {
     ) IdentityElementError!P256 {
         const s1 = if (endian == .little) s1_ else Fe.orderSwap(s1_);
         const s2 = if (endian == .little) s2_ else Fe.orderSwap(s2_);
+        if (p1.is_base and nistz_base.enabled) {
+            const term1 = try nistz_base.mulBase(s1);
+            const term2 = if (pc2_cached) |pc|
+                try pcMul(pc, s2, true)
+            else blk: {
+                try p2.rejectIdentity();
+                var pc2_array: [9]P256 = undefined;
+                pc2_array = precompute(p2, 8);
+                break :blk try pcMul(&pc2_array, s2, true);
+            };
+            const sum = term1.add(term2);
+            try sum.rejectIdentity();
+            return sum;
+        }
         try p1.rejectIdentity();
         var pc1_array: [9]P256 = undefined;
         const pc1 = if (p1.is_base) basePointPc[0..9] else pc: {
