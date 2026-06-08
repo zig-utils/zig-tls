@@ -353,23 +353,33 @@ pub const CertificateBuilder = struct {
                         break :blk try key_pair.signPrehashed(digest, null);
                     },
                     .tls_1_3 => blk: {
-                        const verify_bytes = if (h.side == .server)
-                            h.transcript.serverCertificateVerify()
-                        else
-                            h.transcript.clientCertificateVerify();
                         const Hash = switch (comptime_scheme) {
                             .ecdsa_secp256r1_sha256 => crypto.hash.sha2.Sha256,
                             .ecdsa_secp384r1_sha384 => crypto.hash.sha2.Sha384,
                             else => unreachable,
                         };
                         var digest: [Hash.digest_length]u8 = undefined;
-                        Hash.hash(verify_bytes, &digest, .{});
+                        switch (comptime_scheme) {
+                            .ecdsa_secp256r1_sha256 => switch (h.side) {
+                                .server => h.transcript.serverCertificateVerifyDigest(&digest),
+                                .client => h.transcript.clientCertificateVerifyDigest(&digest),
+                            },
+                            .ecdsa_secp384r1_sha384 => switch (h.side) {
+                                .server => h.transcript.serverCertificateVerifyDigestSha384(&digest),
+                                .client => h.transcript.clientCertificateVerifyDigestSha384(&digest),
+                            },
+                            else => unreachable,
+                        }
                         break :blk try key_pair.signPrehashed(digest, null);
                     },
                     else => unreachable,
                 };
                 var buf: [Ecdsa.Signature.der_encoded_length_max]u8 = undefined;
-                break :brk .{ signature.toDer(&buf), comptime_scheme };
+                const der_bytes = if (comptime_scheme == .ecdsa_secp256r1_sha256)
+                    ecdsa_p256.signatureToDerTls(signature, &buf)
+                else
+                    signature.toDer(&buf);
+                break :brk .{ der_bytes, comptime_scheme };
             },
             inline .rsa_pss_rsae_sha256,
             .rsa_pss_rsae_sha384,

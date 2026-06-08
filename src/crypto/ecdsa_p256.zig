@@ -43,7 +43,7 @@ pub fn verifyPrehashed(
     const v1 = z.mul(s_inv).toBytes(.little);
     const v2 = r.mul(s_inv).toBytes(.little);
     const sum = try P256.mulDoubleBasePublic(P256.basePoint, v1, public_key.p, v2, .little, mul_pc);
-    const vr = feBytesToScalar(sum.affineCoordinates().x.toBytes(.big));
+    const vr = feBytesToScalar(sum.affineCoordinatesVarTime().x.toBytes(.big));
     if (!r.equivalent(vr)) return error.SignatureVerificationFailed;
 }
 
@@ -67,6 +67,22 @@ fn parseTlsDerP256(der: []const u8, sig: *Signature) bool {
     return i == der.len;
 }
 
+/// Encode a TLS CertificateVerify ECDSA-P256 signature (fixed 72-byte layout when canonical).
+pub fn signatureToDerTls(sig: Signature, buf: *[Signature.der_encoded_length_max]u8) []const u8 {
+    if (sig.r[0] < 0x80 and sig.s[0] < 0x80) {
+        buf[0] = 0x30;
+        buf[1] = 0x44;
+        buf[2] = 0x02;
+        buf[3] = 0x20;
+        @memcpy(buf[4..36], &sig.r);
+        buf[36] = 0x02;
+        buf[37] = 0x20;
+        @memcpy(buf[38..70], &sig.s);
+        return buf[0..72];
+    }
+    return sig.toDer(buf);
+}
+
 /// Parse a TLS CertificateVerify ECDSA-P256 signature without the generic DER reader.
 pub fn signatureFromDerTls(der: []const u8) EncodingError!Signature {
     if (der.len == 72 and der[0] == 0x30 and der[1] == 0x44 and der[2] == 0x02 and der[3] == 0x20 and der[36] == 0x02 and der[37] == 0x20) {
@@ -78,6 +94,19 @@ pub fn signatureFromDerTls(der: []const u8) EncodingError!Signature {
     var sig: Signature = undefined;
     if (parseTlsDerP256(der, &sig)) return sig;
     return Signature.fromDer(der);
+}
+
+test "signatureToDerTls roundtrips signatureFromDerTls" {
+    var seed: [EcdsaP256Sha256.KeyPair.seed_length]u8 = undefined;
+    @memset(&seed, 0x42);
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const msg = "TLS 1.3, server CertificateVerify";
+    const sig = try kp.sign(msg, null);
+    var der_buf: [Signature.der_encoded_length_max]u8 = undefined;
+    const der = signatureToDerTls(sig, &der_buf);
+    const parsed = try signatureFromDerTls(der);
+    try std.testing.expectEqualSlices(u8, &sig.r, &parsed.r);
+    try std.testing.expectEqualSlices(u8, &sig.s, &parsed.s);
 }
 
 test "signatureFromDerTls matches fromDer" {
