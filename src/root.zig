@@ -94,7 +94,16 @@ pub const config = struct {
 
     pub const Client = @import("handshake_client.zig").Options;
     pub const Server = @import("handshake_server.zig").Options;
+    pub const alpn = @import("alpn.zig");
+    pub const cipher_names = @import("cipher_names.zig");
+    pub const session_ticket = @import("session_ticket.zig");
 };
+
+pub const alpn = @import("alpn.zig");
+pub const cipher_names = @import("cipher_names.zig");
+pub const session_ticket = @import("session_ticket.zig");
+pub const embed = @import("embed.zig");
+pub const ktls_linux = @import("ktls_linux.zig");
 
 /// Non-blocking client/server handshake and connection. Handshake produces
 /// cipher used in connection to encrypt data for sending and decrypt received
@@ -209,4 +218,8 @@ test {
     _ = @import("record.zig");
     _ = @import("transcript.zig");
     _ = @import("PrivateKey.zig");
+    _ = @import("alpn.zig");
+    _ = @import("cipher_names.zig");
+    _ = @import("session_ticket.zig");
+    _ = @import("ktls_linux.zig");
 }
