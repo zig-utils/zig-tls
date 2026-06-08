@@ -5,6 +5,7 @@ const Aes128Gcm = crypto.aead.aes_gcm.Aes128Gcm;
 const proto = @import("protocol.zig");
 const record = @import("record.zig");
 const CipherSuite = @import("cipher.zig").CipherSuite;
+const rng = @import("random.zig");
 
 fn nowSeconds() i64 {
     var ts: std.c.timespec = undefined;
@@ -28,7 +29,6 @@ pub const TicketKeys = struct {
     }
 
     pub fn random() TicketKeys {
-        const rng = @import("random.zig");
         var keys: [48]u8 = undefined;
         rng.fill(&keys);
         return fromBytes(&keys);
@@ -42,6 +42,9 @@ pub const SessionState = struct {
     named_group: proto.NamedGroup,
     master_secret: [48]u8,
     session_timeout_secs: u32 = 300,
+    /// TLS 1.3 PSK ticket_nonce (RFC 8446); distinct from the AES-GCM encryption nonce in the identity blob.
+    psk_nonce_len: u8 = 0,
+    psk_nonce: [Aes128Gcm.nonce_length]u8 = undefined,
 };
 
 pub const Ticket = struct {
@@ -74,6 +77,10 @@ pub fn encrypt(
     idx += 4;
     mem.writeInt(u64, plaintext[idx .. idx + 8][0..8], @intCast(nowSeconds()), .big);
     idx += 8;
+    plaintext[idx] = state.psk_nonce_len;
+    idx += 1;
+    @memcpy(plaintext[idx .. idx + state.psk_nonce_len], state.psk_nonce[0..state.psk_nonce_len]);
+    idx += state.psk_nonce_len;
 
     const aad = keys.name;
     var ciphertext_buf: [128 + Aes128Gcm.tag_length]u8 = undefined;
@@ -102,7 +109,7 @@ pub fn decrypt(identity: []const u8, keys: TicketKeys) ?SessionState {
     if (identity.len < 18) return null;
     if (!mem.eql(u8, identity[0..16], &keys.name)) return null;
     const nonce_len = identity[16];
-    if (identity.len < 17 + nonce_len + Aes128Gcm.tag_length + 58) return null;
+    if (identity.len < 17 + nonce_len + Aes128Gcm.tag_length + 59) return null;
     const nonce = identity[17 .. 17 + nonce_len];
     const ciphertext = identity[17 + nonce_len ..];
     if (nonce.len != Aes128Gcm.nonce_length) return null;
@@ -125,6 +132,9 @@ pub fn decrypt(identity: []const u8, keys: TicketKeys) ?SessionState {
     @memcpy(&state.master_secret, plaintext[6..54]);
     state.session_timeout_secs = mem.readInt(u32, plaintext[54..58], .big);
     const issued_at = mem.readInt(i64, plaintext[58..66], .big);
+    state.psk_nonce_len = plaintext[66];
+    if (state.psk_nonce_len > Aes128Gcm.nonce_length) return null;
+    @memcpy(state.psk_nonce[0..state.psk_nonce_len], plaintext[67 .. 67 + state.psk_nonce_len]);
     const now = nowSeconds();
     if (now - issued_at > state.session_timeout_secs) return null;
     return state;
@@ -168,7 +178,9 @@ pub const Manager = struct {
     keys: TicketKeys,
     session_timeout_secs: u32 = 300,
     ticket_lifetime_secs: u32 = 7200,
-    nonce_buf: [8]u8 = undefined,
+    nonce_buf: [Aes128Gcm.nonce_length]u8 = undefined,
+    last_enc_nonce: [Aes128Gcm.nonce_length]u8 = undefined,
+    last_psk_nonce: [Aes128Gcm.nonce_length]u8 = undefined,
     nonce_counter: u64 = 0,
     new_session_cb: ?NewSessionCallback = null,
     resume_session_cb: ?ResumeSessionCallback = null,
@@ -180,22 +192,27 @@ pub const Manager = struct {
 
     pub fn nextNonce(self: *Manager) []const u8 {
         self.nonce_counter +%= 1;
-        mem.writeInt(u64, &self.nonce_buf, self.nonce_counter, .big);
+        @memset(&self.nonce_buf, 0);
+        mem.writeInt(u64, self.nonce_buf[4..][0..8], self.nonce_counter, .big);
         return &self.nonce_buf;
     }
 
     pub fn issueTicket(
         self: *Manager,
         allocator: mem.Allocator,
-        state: SessionState,
+        state_in: SessionState,
     ) !Ticket {
-        const nonce = self.nextNonce();
-        const identity = try encrypt(allocator, self.keys, state, nonce);
+        @memcpy(&self.last_enc_nonce, self.nextNonce());
+        @memcpy(&self.last_psk_nonce, self.nextNonce());
+        var state = state_in;
+        state.psk_nonce_len = Aes128Gcm.nonce_length;
+        @memcpy(&state.psk_nonce, &self.last_psk_nonce);
+        const identity = try encrypt(allocator, self.keys, state, &self.last_enc_nonce);
         const ticket: Ticket = .{
             .identity = identity,
             .lifetime = self.ticket_lifetime_secs,
-            .age_add = @truncate(std.crypto.random.uint(u32)),
-            .nonce = nonce,
+            .age_add = rng.csprng.int(u32),
+            .nonce = &self.last_psk_nonce,
             .state = state,
         };
         if (self.new_session_cb) |cb| {
@@ -213,6 +230,27 @@ pub const Manager = struct {
 };
 
 const testing = std.testing;
+
+test "issueTicket separates encryption and PSK nonces" {
+    const keys = TicketKeys.random();
+    var mgr = Manager.init(keys);
+    const state: SessionState = .{
+        .tls_version = .tls_1_3,
+        .cipher_suite = .AES_128_GCM_SHA256,
+        .named_group = .x25519,
+        .master_secret = @as([48]u8, @splat(0xAB)),
+        .session_timeout_secs = 3600,
+    };
+    const ticket = try mgr.issueTicket(testing.allocator, state);
+    defer testing.allocator.free(ticket.identity);
+    try testing.expectEqual(Aes128Gcm.nonce_length, ticket.nonce.len);
+    const enc_nonce_len = ticket.identity[16];
+    const enc_nonce = ticket.identity[17 .. 17 + enc_nonce_len];
+    try testing.expect(!mem.eql(u8, enc_nonce, ticket.nonce));
+    const recovered = ticket.state.?;
+    try testing.expectEqual(Aes128Gcm.nonce_length, recovered.psk_nonce_len);
+    try testing.expectEqualSlices(u8, ticket.nonce, recovered.psk_nonce[0..recovered.psk_nonce_len]);
+}
 
 test "encrypt decrypt roundtrip" {
     const keys = TicketKeys.random();
