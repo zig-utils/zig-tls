@@ -159,9 +159,9 @@ pub const Scalar = struct {
         return Scalar{ .fe = n.fe.invert() };
     }
 
-    /// Variable-time inverse for verification (Fermat; uses hw ord mul/sqr when available).
+    /// Variable-time inverse for verification (fixed addition chain; hw ord mul/sqr).
     pub fn invertVarTime(n: Scalar) Scalar {
-        return Scalar{ .fe = n.fe.pow(u256, field_order - 2) };
+        return Scalar{ .fe = @import("scalar_invert_chain.zig").invert(n.fe) };
     }
 
     /// Return true if n is a quadratic residue mod L.
@@ -242,4 +242,16 @@ test "invertVarTime matches invert" {
     s[0] = 0x42;
     const n = Scalar.fromBytes48(s, .little);
     try std.testing.expect(Scalar.invertVarTime(n).equivalent(Scalar.invert(n)));
+}
+
+test "invertVarTime chain matches invert on random scalars" {
+    var s: [48]u8 = undefined;
+    var i: u32 = 1;
+    while (i < 50) : (i += 1) {
+        @memset(&s, 0);
+        std.mem.writeInt(u32, s[0..4], i, .little);
+        const n = Scalar.fromBytes48(s, .little);
+        if (n.isZero()) continue;
+        try std.testing.expect(Scalar.invertVarTime(n).equivalent(Scalar.invert(n)));
+    }
 }
