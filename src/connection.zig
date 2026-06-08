@@ -10,6 +10,9 @@ const Record = record.Record;
 const cipher = @import("cipher.zig");
 const Cipher = cipher.Cipher;
 const SessionResumption = @import("handshake_client.zig").Options.SessionResumption;
+const session_ticket = @import("session_ticket.zig");
+const Ktls = @import("Ktls.zig");
+const ktls_linux = @import("ktls_linux.zig");
 
 const log = std.log.scoped(.tls);
 
@@ -28,7 +31,39 @@ pub const Connection = struct {
     session_resumption: ?*SessionResumption = null,
     session_resumption_secret_idx: ?usize = null,
 
+    /// Kernel TLS offload state (Linux only).
+    ktls: ?Ktls = null,
+    ktls_fd: ?std.posix.socket_t = null,
+    decrypt_buf: [cipher.max_ciphertext_record_len]u8 = undefined,
+
     const Self = @This();
+
+    /// Enable kernel TLS offload on `fd` after handshake completes.
+    /// Falls back to userspace crypto on non-Linux or unsupported ciphers.
+    pub fn enableKtls(c: *Self, fd: std.posix.socket_t) !void {
+        if (!ktls_linux.isSupported(c.cipher)) return error.UnsupportedCipher;
+        const ktls_info = Ktls.init(c.cipher);
+        try ktls_linux.enable(fd, ktls_info);
+        c.ktls = ktls_info;
+        c.ktls_fd = fd;
+    }
+
+    pub fn ktlsEnabled(c: Self) bool {
+        return c.ktls != null;
+    }
+
+    /// Send a TLS 1.3 NewSessionTicket post-handshake message (server only).
+    pub fn sendNewSessionTicket(c: *Self, ticket: session_ticket.Ticket) !void {
+        var buf: [4096]u8 = undefined;
+        const body = try session_ticket.makeNewSessionTicket(
+            &buf,
+            ticket.lifetime,
+            ticket.age_add,
+            ticket.nonce,
+            ticket.identity,
+        );
+        try c.writeRecord(.handshake, body);
+    }
 
     /// Encrypts and writes single tls record to the stream.
     fn writeRecord(c: *Self, content_type: proto.ContentType, bytes: []const u8) !void {
@@ -92,8 +127,11 @@ pub const Connection = struct {
             // then writing a block, cleartext has less length then ciphertext,
             // cleartext starts from the beginning of the buffer, so ciphertext
             // is always ahead of cleartext.
-            const cleartext_buf = if (buffer.len >= rec.payload.len) buffer else @constCast(rec.buffer);
-            const content_type, const cleartext = try c.cipher.decrypt(cleartext_buf, rec);
+            const cleartext_buf, const local_rec = if (buffer.len >= rec.payload.len) .{ buffer, rec } else blk: {
+                @memcpy(c.decrypt_buf[0..rec.buffer.len], rec.buffer);
+                break :blk .{ c.decrypt_buf[0..rec.buffer.len], Record.init(c.decrypt_buf[0..rec.buffer.len]) };
+            };
+            const content_type, const cleartext = try c.cipher.decrypt(cleartext_buf, local_rec);
 
             switch (content_type) {
                 .application_data => {},
@@ -338,7 +376,13 @@ const testu = @import("testu.zig");
 
 test "encrypt decrypt" {
     var output_buf: [1024]u8 = undefined;
-    var stream_reader: Io.Reader = .fixed(&data12.server_pong ** 4);
+    const server_pong_x4 = comptime blk: {
+        const p = data12.server_pong;
+        var buf: [p.len * 4]u8 = undefined;
+        for (0..4) |i| @memcpy(buf[i * p.len ..][0..p.len], &p);
+        break :blk buf;
+    };
+    var stream_reader: Io.Reader = .fixed(&server_pong_x4);
     var stream_writer: Io.Writer = .fixed(&output_buf);
     var conn: Connection = .{
         .input = &stream_reader,
