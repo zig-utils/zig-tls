@@ -30,6 +30,7 @@ pub fn verifyPrehashed(
     sig: Signature,
     msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8,
     public_key: PublicKey,
+    mul_pc: ?*const [9]P256,
 ) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
     const r = try scalar.Scalar.fromBytes(sig.r, .big);
     const s = try scalar.Scalar.fromBytes(sig.s, .big);
@@ -41,7 +42,7 @@ pub fn verifyPrehashed(
     const s_inv = s.invert();
     const v1 = z.mul(s_inv).toBytes(.little);
     const v2 = r.mul(s_inv).toBytes(.little);
-    const sum = try P256.mulDoubleBasePublic(P256.basePoint, v1, public_key.p, v2, .little);
+    const sum = try P256.mulDoubleBasePublic(P256.basePoint, v1, public_key.p, v2, .little, mul_pc);
     const vr = feBytesToScalar(sum.affineCoordinates().x.toBytes(.big));
     if (!r.equivalent(vr)) return error.SignatureVerificationFailed;
 }
@@ -100,7 +101,8 @@ test "verifyPrehashed matches std verifyPrehashed" {
     const sig = try kp.sign(msg, null);
     var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     crypto.hash.sha2.Sha256.hash(msg, &digest, .{});
-    try verifyPrehashed(sig, digest, kp.public_key);
+    const mul_pc = try P256.precomputeMulPublic(kp.public_key.p);
+    try verifyPrehashed(sig, digest, kp.public_key, &mul_pc);
     try sig.verifyPrehashed(digest, kp.public_key);
 }
 

@@ -506,6 +506,7 @@ pub const CertificateParser = struct {
 
     /// Parsed leaf public keys (avoid re-parsing SEC1/DER on CertificateVerify).
     ecdsa_p256_pk: ?EcdsaP256Sha256.PublicKey = null,
+    ecdsa_p256_mul_pc: ?[9]ecdsa_p256.P256 = null,
     ecdsa_p384_pk: ?EcdsaP384Sha384.PublicKey = null,
     ed25519_pk: ?crypto.sign.Ed25519.PublicKey = null,
     rsa_pk: ?rsa.PublicKey = null,
@@ -697,7 +698,10 @@ pub const CertificateParser = struct {
     fn cacheParsedPublicKey(h: *CertificateParser) !void {
         switch (h.pub_key_algo) {
             .X9_62_id_ecPublicKey => |curve| switch (curve) {
-                .X9_62_prime256v1 => h.ecdsa_p256_pk = try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key),
+                .X9_62_prime256v1 => {
+                    h.ecdsa_p256_pk = try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
+                    h.ecdsa_p256_mul_pc = try ecdsa_p256.P256.precomputeMulPublic(h.ecdsa_p256_pk.?.p);
+                },
                 .secp384r1 => h.ecdsa_p384_pk = try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key),
                 else => {},
             },
@@ -724,7 +728,7 @@ pub const CertificateParser = struct {
                     .server => transcript.serverCertificateVerifyDigest(&digest),
                     .client => transcript.clientCertificateVerifyDigest(&digest),
                 }
-                try ecdsa_p256.verifyPrehashed(sig, digest, key);
+                try ecdsa_p256.verifyPrehashed(sig, digest, key, if (h.ecdsa_p256_mul_pc) |*pc| pc else null);
             },
             .ecdsa_secp384r1_sha384 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
@@ -757,7 +761,7 @@ pub const CertificateParser = struct {
                 const sig = try ecdsa_p256.signatureFromDerTls(h.signature);
                 var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
                 crypto.hash.sha2.Sha256.hash(verify_bytes, &digest, .{});
-                try ecdsa_p256.verifyPrehashed(sig, digest, key);
+                try ecdsa_p256.verifyPrehashed(sig, digest, key, if (h.ecdsa_p256_mul_pc) |*pc| pc else null);
             },
             .ecdsa_secp384r1_sha384 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;

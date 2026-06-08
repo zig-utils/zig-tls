@@ -431,6 +431,12 @@ pub const P256 = struct {
         return pcMul16(&pc, s, false);
     }
 
+    /// Precompute a width-8 table for variable-time `mulPublic` / Shamir verify.
+    pub fn precomputeMulPublic(p: P256) IdentityElementError![9]P256 {
+        try p.rejectIdentity();
+        return precompute(p, 8);
+    }
+
     /// Multiply an elliptic curve point by a *PUBLIC* scalar *IN VARIABLE TIME*
     /// This can be used for signature verification.
     pub fn mulPublic(p: P256, s_: [32]u8, endian: std.builtin.Endian) IdentityElementError!P256 {
@@ -446,7 +452,14 @@ pub const P256 = struct {
 
     /// Double-base multiplication of public parameters - Compute (p1*s1)+(p2*s2) *IN VARIABLE TIME*
     /// This can be used for signature verification.
-    pub fn mulDoubleBasePublic(p1: P256, s1_: [32]u8, p2: P256, s2_: [32]u8, endian: std.builtin.Endian) IdentityElementError!P256 {
+    pub fn mulDoubleBasePublic(
+        p1: P256,
+        s1_: [32]u8,
+        p2: P256,
+        s2_: [32]u8,
+        endian: std.builtin.Endian,
+        pc2_cached: ?*const [9]P256,
+    ) IdentityElementError!P256 {
         const s1 = if (endian == .little) s1_ else Fe.orderSwap(s1_);
         const s2 = if (endian == .little) s2_ else Fe.orderSwap(s2_);
         try p1.rejectIdentity();
@@ -457,7 +470,7 @@ pub const P256 = struct {
         };
         try p2.rejectIdentity();
         var pc2_array: [9]P256 = undefined;
-        const pc2 = if (p2.is_base) basePointPc[0..9] else pc: {
+        const pc2: []const P256 = if (pc2_cached) |pc| pc else if (p2.is_base) basePointPc[0..9] else pc: {
             pc2_array = precompute(p2, 8);
             break :pc &pc2_array;
         };
