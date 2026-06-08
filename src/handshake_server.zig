@@ -24,6 +24,8 @@ const CertKeyPair = common.CertKeyPair;
 const cert = common.cert;
 
 const rng = @import("random.zig");
+const alpn = @import("alpn.zig");
+const session_ticket = @import("session_ticket.zig");
 const log = std.log.scoped(.tls);
 
 pub const Options = struct {
@@ -40,9 +42,56 @@ pub const Options = struct {
     /// Default includes both TLS 1.3 and TLS 1.2 secure ciphers for maximum compatibility.
     cipher_suites: []const CipherSuite = cipher_suites.all,
 
-    /// Named groups (elliptic curves) to support for key exchange
-    named_groups: []const proto.NamedGroup = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 },
+    /// Named groups (elliptic curves) to support for key exchange.
+    /// Overridden when `enable_post_quantum` is true.
+    named_groups: []const proto.NamedGroup = default_named_groups,
+
+    /// ALPN protocols offered by the server (static list).
+    alpn_protocols: []const alpn.Protocol = &.{},
+
+    /// Per-connection ALPN picker (Node `ALPNCallback`). Takes precedence over static list.
+    alpn_callback: ?alpn.Callback = null,
+    alpn_callback_ctx: ?*anyopaque = null,
+
+    /// Per-connection certificate selection based on SNI (Node `SNICallback`).
+    sni_callback: ?SNICallback = null,
+    sni_callback_ctx: ?*anyopaque = null,
+
+    /// Session ticket configuration (Node `ticketKeys` / `sessionTimeout`).
+    session_tickets: ?SessionTickets = null,
+
+    /// Enable ML-KEM-768 + X25519 hybrid key exchange on the server.
+    enable_post_quantum: bool = false,
+
+    /// Minimum/maximum TLS protocol version.
+    min_version: proto.Version = .tls_1_2,
+    max_version: proto.Version = .tls_1_3,
+
+    /// OCSP stapling response to include in handshake (when provided).
+    ocsp_response: ?[]const u8 = null,
+
+    pub const SNICallback = *const fn (
+        ctx: ?*anyopaque,
+        server_name: []const u8,
+    ) ?*CertKeyPair;
+
+    pub const SessionTickets = struct {
+        keys: session_ticket.TicketKeys = undefined,
+        session_timeout_secs: u32 = 300,
+        ticket_lifetime_secs: u32 = 7200,
+        new_session_cb: ?session_ticket.NewSessionCallback = null,
+        resume_session_cb: ?session_ticket.ResumeSessionCallback = null,
+        callback_ctx: ?*anyopaque = null,
+    };
+
+    pub fn effectiveNamedGroups(self: Options) []const proto.NamedGroup {
+        if (self.enable_post_quantum) return pq_named_groups;
+        return self.named_groups;
+    }
 };
+
+const default_named_groups = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 };
+const pq_named_groups = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1, .x25519_ml_kem768 };
 
 pub const ClientAuth = struct {
     /// Set of root certificate authorities that server use when verifying
@@ -62,9 +111,8 @@ pub const ClientAuth = struct {
 };
 
 pub const Handshake = struct {
-    // public key len: x25519 = 32, secp256r1 = 65, secp384r1 = 97
-    const max_pub_key_len = 98;
-    const supported_named_groups = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 };
+    // public key len: x25519 = 32, secp256r1 = 65, secp384r1 = 97, ml_kem = 1120
+    const max_pub_key_len = 1216;
 
     /// Underlying network connection stream reader/writer pair.
     input: *Io.Reader,
@@ -81,6 +129,14 @@ pub const Handshake = struct {
     client_pub_key: []u8 = &.{},
     server_pub_key_buf: [max_pub_key_len]u8 = undefined,
     server_pub_key: []u8 = &.{},
+
+    server_name_buf: [256]u8 = undefined,
+    server_name: []const u8 = &.{},
+    selected_alpn: ?alpn.Protocol = null,
+    client_alpn_storage: [16]alpn.Protocol = undefined,
+    client_alpn_protocols: []const alpn.Protocol = &.{},
+    pending_ticket: ?session_ticket.Ticket = null,
+    resumption_master_secret: [48]u8 = undefined,
 
     cipher: Cipher = undefined,
     transcript: Transcript = .{},
@@ -105,13 +161,34 @@ pub const Handshake = struct {
         try h.output.flush();
     }
 
-    pub fn handshake(h: *Self, opt: Options) !Cipher {
-        h.initKeys(opt);
+    pub fn handshake(h: *Self, opt_in: Options) !Cipher {
+        h.initKeys(opt_in);
+        var opt = opt_in;
 
-        h.readClientHello(opt.cipher_suites, opt.named_groups) catch |err| {
+        h.readClientHello(opt.cipher_suites, opt.effectiveNamedGroups()) catch |err| {
             try h.writeAlert(null, err);
             return err;
         };
+
+        // SNI callback may override server certificate
+        if (opt.sni_callback) |cb| {
+            if (h.server_name.len > 0) {
+                if (cb(opt.sni_callback_ctx, h.server_name)) |cert_key| {
+                    opt.auth = cert_key;
+                    h.signature_scheme = cert_key.key.signature_scheme;
+                }
+            }
+        }
+
+        // ALPN negotiation
+        h.selected_alpn = alpn.negotiateWithCallback(
+            opt.alpn_callback,
+            opt.alpn_callback_ctx,
+            h.server_name,
+            h.client_alpn_protocols,
+            opt.alpn_protocols,
+        );
+
         h.transcript.use(h.cipher_suite.hash());
 
         if (h.tls_version == .tls_1_3) {
@@ -156,7 +233,31 @@ pub const Handshake = struct {
         // Initialize DH key pair for key exchange (used in TLS 1.2 ECDHE)
         var seed: [DhKeyPair.seed_len]u8 = undefined;
         rng.fill(&seed);
-        h.dh_kp = DhKeyPair.init(seed, opt.named_groups) catch unreachable;
+        h.dh_kp = DhKeyPair.init(seed, opt.effectiveNamedGroups()) catch unreachable;
+    }
+
+    pub fn selectedAlpnProtocol(h: Self) ?alpn.Protocol {
+        return h.selected_alpn;
+    }
+
+    pub fn issueSessionTicket(h: *Self, opt: Options, allocator: mem.Allocator) !?session_ticket.Ticket {
+        const tickets = opt.session_tickets orelse return null;
+        var manager = session_ticket.Manager.init(tickets.keys);
+        manager.session_timeout_secs = tickets.session_timeout_secs;
+        manager.ticket_lifetime_secs = tickets.ticket_lifetime_secs;
+        manager.new_session_cb = tickets.new_session_cb;
+        manager.resume_session_cb = tickets.resume_session_cb;
+        manager.callback_ctx = tickets.callback_ctx;
+
+        @memcpy(&h.resumption_master_secret, h.transcript.resumptionSecret());
+        const state: session_ticket.SessionState = .{
+            .tls_version = h.tls_version,
+            .cipher_suite = h.cipher_suite,
+            .named_group = h.named_group,
+            .master_secret = h.resumption_master_secret,
+            .session_timeout_secs = tickets.session_timeout_secs,
+        };
+        return try manager.issueTicket(allocator, state);
     }
 
     fn clientFlight1(h: *Self, opt: Options) !void {
@@ -502,8 +603,10 @@ pub const Handshake = struct {
         }
         try w.record(.change_cipher_spec, &[_]u8{1});
         {
+            var ee_buf: [256]u8 = undefined;
+            const ee_payload = try alpn.makeEncryptedExtensionsBody(&ee_buf, h.selected_alpn);
             var hw = try w.writerAdvance(record.header_len);
-            try hw.handshakeRecord(.encrypted_extensions, &[_]u8{ 0, 0 });
+            try hw.handshakeRecord(.encrypted_extensions, ee_payload);
             h.transcript.update(hw.buffered());
             try h.writeEncrypted(&w, hw.buffered());
         }
@@ -758,7 +861,7 @@ pub const Handshake = struct {
                 .key_share => {
                     if (extension_len == 0) return error.TlsDecodeError;
                     key_share_received = true;
-                    var selected_named_group_idx = supported_named_groups.len;
+                    var selected_named_group_idx = server_named_groups.len;
                     const end_idx = try d.decode(u16) + d.idx;
                     while (d.idx < end_idx) {
                         const named_group = try d.decode(proto.NamedGroup);
@@ -770,7 +873,7 @@ pub const Handshake = struct {
                             else => {},
                         }
                         const client_pub_key = try d.slice(try d.decode(u16));
-                        for (supported_named_groups, 0..) |supported, idx| {
+                        for (server_named_groups, 0..) |supported, idx| {
                             if (named_group == supported and idx < selected_named_group_idx) {
                                 h.named_group = named_group;
                                 h.client_pub_key = try common.dupe(&h.client_pub_key_buf, client_pub_key);
@@ -816,6 +919,31 @@ pub const Handshake = struct {
                         }
                         if (!found) return error.TlsHandshakeFailure;
                     }
+                },
+                .server_name => {
+                    const ext_end = d.idx + extension_len;
+                    const list_len = try d.decode(u16);
+                    const list_end = d.idx + list_len;
+                    while (d.idx < list_end) {
+                        const name_type = try d.decode(u8);
+                        const name_len = try d.decode(u16);
+                        const name = try d.slice(name_len);
+                        if (name_type == 0 and h.server_name.len == 0) {
+                            h.server_name = try common.dupe(&h.server_name_buf, name);
+                        }
+                    }
+                    if (d.idx < ext_end) try d.skip(ext_end - d.idx);
+                },
+                .application_layer_protocol_negotiation => {
+                    const ext_data = d.payload[d.idx..][0..extension_len];
+                    h.client_alpn_protocols = alpn.parseProtocolListFixed(
+                        ext_data,
+                        &h.client_alpn_storage,
+                    ) catch return error.TlsDecodeError;
+                    try d.skip(extension_len);
+                },
+                .status_request => {
+                    try d.skip(extension_len);
                 },
                 else => {
                     try d.skip(extension_len);
@@ -1065,5 +1193,10 @@ pub const NonBlock = struct {
     /// Cipher produced in handshake, null until successful handshake.
     pub fn cipher(self: Self) ?Cipher {
         return if (self.done()) self.inner.cipher else null;
+    }
+
+    /// Negotiated ALPN protocol, available after handshake completes.
+    pub fn selectedAlpn(self: Self) ?alpn.Protocol {
+        return if (self.done()) self.inner.selected_alpn else null;
     }
 };
