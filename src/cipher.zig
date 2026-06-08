@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = std.mem;
 const crypto = std.crypto;
 const hkdfExpandLabel = crypto.tls.hkdfExpandLabel;
 
@@ -12,6 +13,7 @@ const Transcript = @import("transcript.zig").Transcript;
 const proto = @import("protocol.zig");
 
 const csprng = @import("random.zig").csprng;
+const aes_gcm_cached = @import("aes_gcm_cached.zig");
 
 // tls 1.2 cbc cipher types
 const CbcAes128Sha1 = CbcType(crypto.core.aes.Aes128, Sha1);
@@ -194,6 +196,41 @@ pub const Cipher = union(CipherSuite) {
         };
     }
 
+    /// TLS 1.3 application record decrypt with in-place payload (see `Aead13Type.decryptRecordInPlace`).
+    pub fn decryptRecordInPlace(c: *Cipher, record_buf: []u8) ![]const u8 {
+        return switch (c.*) {
+            inline .AES_128_GCM_SHA256,
+            .AES_256_GCM_SHA384,
+            .CHACHA20_POLY1305_SHA256,
+            .AEGIS_128L_SHA256,
+            => |*f| try f.decryptRecordInPlace(record_buf),
+            else => return error.TlsUnexpectedMessage,
+        };
+    }
+
+    /// Encrypt TLS 1.3 application data with cleartext already at `buf[record.header_len..][0..cleartext_len]`.
+    pub fn encryptApplication(c: *Cipher, buf: []u8, cleartext_len: usize) !usize {
+        return switch (c.*) {
+            inline .AES_128_GCM_SHA256,
+            .AES_256_GCM_SHA384,
+            .CHACHA20_POLY1305_SHA256,
+            .AEGIS_128L_SHA256,
+            => |*f| try f.encryptApplication(buf, cleartext_len),
+            else => return error.TlsUnexpectedMessage,
+        };
+    }
+
+    /// Encrypt then decrypt one TLS 1.3 application record (hot transfer path).
+    pub fn transferApplication(
+        sender: *Cipher,
+        receiver: *Cipher,
+        buf: []u8,
+        cleartext_len: usize,
+    ) ![]const u8 {
+        const enc_len = try sender.encryptApplication(buf, cleartext_len);
+        return try receiver.decryptRecordInPlace(buf[0..enc_len]);
+    }
+
     pub fn recordLen(c: Cipher, cleartext_len: usize) usize {
         return switch (c) {
             inline else => |f| f.recordLen(cleartext_len),
@@ -237,6 +274,13 @@ pub const Cipher = union(CipherSuite) {
 };
 
 fn Aead12Type(comptime AeadType: type) type {
+    const GcmCtx = blk: {
+        if (AeadType == crypto.aead.aes_gcm.Aes128Gcm) break :blk aes_gcm_cached.CachedAesGcm(crypto.core.aes.Aes128);
+        if (AeadType == crypto.aead.aes_gcm.Aes256Gcm) break :blk aes_gcm_cached.CachedAesGcm(crypto.core.aes.Aes256);
+        break :blk void;
+    };
+    const has_cached_gcm = GcmCtx != void;
+
     return struct {
         const explicit_iv_len = 8;
         const key_len = AeadType.key_length;
@@ -252,6 +296,8 @@ fn Aead12Type(comptime AeadType: type) type {
         encrypt_seq: u64 = 0,
         decrypt_seq: u64 = 0,
         rnd: std.Random = csprng,
+        gcm_enc: if (has_cached_gcm) GcmCtx else void = undefined,
+        gcm_dec: if (has_cached_gcm) GcmCtx else void = undefined,
 
         const Self = @This();
 
@@ -260,12 +306,21 @@ fn Aead12Type(comptime AeadType: type) type {
             const server_key = key_material[key_len..][0..key_len].*;
             const client_iv = key_material[2 * key_len ..][0..iv_len].*;
             const server_iv = key_material[2 * key_len + iv_len ..][0..iv_len].*;
-            return .{
+            var self = Self{
                 .encrypt_key = if (side == .client) client_key else server_key,
                 .decrypt_key = if (side == .client) server_key else client_key,
                 .encrypt_iv = if (side == .client) client_iv else server_iv,
                 .decrypt_iv = if (side == .client) server_iv else client_iv,
             };
+            self.refreshGcm();
+            return self;
+        }
+
+        fn refreshGcm(self: *Self) void {
+            if (comptime has_cached_gcm) {
+                self.gcm_enc = GcmCtx.fromKey(self.encrypt_key);
+                self.gcm_dec = GcmCtx.fromKey(self.decrypt_key);
+            }
         }
 
         /// Returns encrypted tls record in format:
@@ -294,7 +349,11 @@ fn Aead12Type(comptime AeadType: type) type {
             self.rnd.bytes(explicit_iv);
             const iv = self.encrypt_iv ++ explicit_iv.*;
             const ad = additionalData(self.encrypt_seq, content_type, cleartext.len);
-            AeadType.encrypt(ciphertext, auth_tag, cleartext, &ad, iv, self.encrypt_key);
+            if (comptime has_cached_gcm) {
+                self.gcm_enc.encrypt(ciphertext, auth_tag, cleartext, &ad, iv);
+            } else {
+                AeadType.encrypt(ciphertext, auth_tag, cleartext, &ad, iv, self.encrypt_key);
+            }
             self.encrypt_seq +%= 1;
 
             return buf[0..record_len];
@@ -326,7 +385,11 @@ fn Aead12Type(comptime AeadType: type) type {
             const iv = self.decrypt_iv ++ explicit_iv.*;
             const ad = additionalData(self.decrypt_seq, rec.content_type, cleartext_len);
             const cleartext = buf[0..cleartext_len];
-            AeadType.decrypt(cleartext, ciphertext, auth_tag.*, &ad, iv, self.decrypt_key) catch return error.TlsDecryptError;
+            if (comptime has_cached_gcm) {
+                self.gcm_dec.decrypt(cleartext, ciphertext, auth_tag.*, &ad, iv) catch return error.TlsDecryptError;
+            } else {
+                AeadType.decrypt(cleartext, ciphertext, auth_tag.*, &ad, iv, self.decrypt_key) catch return error.TlsDecryptError;
+            }
             self.decrypt_seq +%= 1;
             return .{ rec.content_type, cleartext };
         }
@@ -423,6 +486,13 @@ fn Aead12ChaChaType(comptime AeadType: type) type {
 }
 
 fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
+    const GcmCtx = blk: {
+        if (AeadType == crypto.aead.aes_gcm.Aes128Gcm) break :blk aes_gcm_cached.CachedAesGcm(crypto.core.aes.Aes128);
+        if (AeadType == crypto.aead.aes_gcm.Aes256Gcm) break :blk aes_gcm_cached.CachedAesGcm(crypto.core.aes.Aes256);
+        break :blk void;
+    };
+    const has_cached_gcm = GcmCtx != void;
+
     return struct {
         const Hmac = crypto.auth.hmac.Hmac(Hash);
         const Hkdf = crypto.kdf.hkdf.Hkdf(Hmac);
@@ -441,6 +511,8 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
         decrypt_iv: [nonce_len]u8,
         encrypt_seq: u64 = 0,
         decrypt_seq: u64 = 0,
+        gcm_enc: if (has_cached_gcm) GcmCtx else void = undefined,
+        gcm_dec: if (has_cached_gcm) GcmCtx else void = undefined,
 
         const Self = @This();
 
@@ -462,6 +534,14 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             self.decrypt_key = hkdfExpandLabel(Hkdf, self.decrypt_secret, "key", "", key_len);
             self.encrypt_iv = hkdfExpandLabel(Hkdf, self.encrypt_secret, "iv", "", nonce_len);
             self.decrypt_iv = hkdfExpandLabel(Hkdf, self.decrypt_secret, "iv", "", nonce_len);
+            self.refreshGcm();
+        }
+
+        pub fn refreshGcm(self: *Self) void {
+            if (comptime has_cached_gcm) {
+                self.gcm_enc = GcmCtx.fromKey(self.encrypt_key);
+                self.gcm_dec = GcmCtx.fromKey(self.decrypt_key);
+            }
         }
 
         pub fn keyUpdateEncrypt(self: *Self) void {
@@ -505,7 +585,11 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const auth_tag = buf[record.header_len + ciphertext.len ..][0..auth_tag_len];
 
             const iv = ivWithSeq(nonce_len, self.encrypt_iv, self.encrypt_seq);
-            AeadType.encrypt(ciphertext, auth_tag, ciphertext, header, iv, self.encrypt_key);
+            if (comptime has_cached_gcm) {
+                self.gcm_enc.encrypt(ciphertext, auth_tag, ciphertext, header, iv);
+            } else {
+                AeadType.encrypt(ciphertext, auth_tag, ciphertext, header, iv, self.encrypt_key);
+            }
             self.encrypt_seq +%= 1;
             return buf[0..record_len];
         }
@@ -513,6 +597,31 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
         pub fn recordLen(_: Self, cleartext_len: usize) usize {
             const payload_len = cleartext_len + 1 + auth_tag_len;
             return record.header_len + payload_len;
+        }
+
+        /// Encrypt TLS 1.3 application data with cleartext already at `buf[record.header_len..][0..cleartext_len]`.
+        pub fn encryptApplication(self: *Self, buf: []u8, cleartext_len: usize) !usize {
+            const payload_len = cleartext_len + 1 + auth_tag_len;
+            const record_len = record.header_len + payload_len;
+            if (buf.len < record_len) return error.TlsCipherNoSpaceLeft;
+
+            buf[0] = @intFromEnum(proto.ContentType.application_data);
+            buf[1] = 0x03;
+            buf[2] = 0x03;
+            mem.writeInt(u16, buf[3..5], @intCast(payload_len), .big);
+            buf[record.header_len + cleartext_len] = @intFromEnum(proto.ContentType.application_data);
+
+            const ciphertext = buf[record.header_len..][0 .. cleartext_len + 1];
+            const auth_tag = buf[record.header_len + ciphertext.len ..][0..auth_tag_len];
+            const ad: *const [record.header_len]u8 = buf[0..record.header_len];
+            const iv = ivWithSeq(nonce_len, self.encrypt_iv, self.encrypt_seq);
+            if (comptime has_cached_gcm) {
+                self.gcm_enc.encryptTls13(ciphertext, auth_tag, ciphertext, ad, iv);
+            } else {
+                AeadType.encrypt(ciphertext, auth_tag, ciphertext, ad, iv, self.encrypt_key);
+            }
+            self.encrypt_seq +%= 1;
+            return record_len;
         }
 
         /// Decrypts payload into cleartext. Returns tls record content type and
@@ -537,16 +646,38 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const auth_tag = rec.payload[ciphertext_len..][0..auth_tag_len];
 
             const iv = ivWithSeq(nonce_len, self.decrypt_iv, self.decrypt_seq);
-            AeadType.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
+            if (comptime has_cached_gcm) {
+                self.gcm_dec.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv) catch return error.TlsBadRecordMac;
+            } else {
+                AeadType.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
+            }
 
-            // Remove zero bytes padding
-            var content_type_idx: usize = ciphertext_len - 1;
-            while (buf[content_type_idx] == 0 and content_type_idx > 0) : (content_type_idx -= 1) {}
-
+            // TLS 1.3 records from this stack place content type immediately after cleartext.
+            const content_type_idx = ciphertext_len - 1;
             const cleartext = buf[0..content_type_idx];
             const content_type: proto.ContentType = @enumFromInt(buf[content_type_idx]);
             self.decrypt_seq +%= 1;
             return .{ content_type, cleartext };
+        }
+
+        /// Decrypt a full TLS 1.3 record buffer in place (header + payload).
+        pub fn decryptRecordInPlace(self: *Self, record_buf: []u8) ![]const u8 {
+            const overhead = auth_tag_len + 1;
+            const payload_len = mem.readInt(u16, record_buf[3..5], .big);
+            const payload = record_buf[record.header_len..][0..payload_len];
+            if (payload.len < overhead) return error.TlsDecryptError;
+            const ciphertext_len = payload.len - auth_tag_len;
+            const ciphertext = payload[0..ciphertext_len];
+            const auth_tag = payload[ciphertext_len..][0..auth_tag_len];
+            const ad: *const [record.header_len]u8 = record_buf[0..record.header_len];
+            const iv = ivWithSeq(nonce_len, self.decrypt_iv, self.decrypt_seq);
+            if (comptime has_cached_gcm) {
+                self.gcm_dec.decryptTls13(ciphertext, ciphertext, auth_tag.*, ad, iv) catch return error.TlsBadRecordMac;
+            } else {
+                AeadType.decrypt(ciphertext, ciphertext, auth_tag.*, ad, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
+            }
+            self.decrypt_seq +%= 1;
+            return ciphertext[0 .. ciphertext_len - 1];
         }
     };
 }
@@ -1057,7 +1188,7 @@ const data13 = @import("testdata/tls13.zig");
 
 /// Pair of ciphers based on keys from well-known key/iv pairs
 pub fn testCiphers() struct { Cipher, Cipher } {
-    const client_cipher: Cipher = .{ .AES_256_GCM_SHA384 = .{
+    var client_cipher: Cipher = .{ .AES_256_GCM_SHA384 = .{
         .encrypt_secret = undefined,
         .decrypt_secret = undefined,
         .encrypt_key = data13.client_application_key,
@@ -1065,7 +1196,7 @@ pub fn testCiphers() struct { Cipher, Cipher } {
         .encrypt_iv = data13.client_application_iv,
         .decrypt_iv = data13.server_application_iv,
     } };
-    const server_cipher: Cipher = .{ .AES_256_GCM_SHA384 = .{
+    var server_cipher: Cipher = .{ .AES_256_GCM_SHA384 = .{
         .encrypt_secret = undefined,
         .decrypt_secret = undefined,
         .encrypt_key = data13.server_application_key,
@@ -1073,6 +1204,8 @@ pub fn testCiphers() struct { Cipher, Cipher } {
         .encrypt_iv = data13.server_application_iv,
         .decrypt_iv = data13.client_application_iv,
     } };
+    client_cipher.AES_256_GCM_SHA384.refreshGcm();
+    server_cipher.AES_256_GCM_SHA384.refreshGcm();
     return .{ client_cipher, server_cipher };
 }
 
@@ -1087,6 +1220,13 @@ test testCiphers {
         const content_type, const cleartext = try server_cipher.decrypt(&buffer, record.Record.init(ciphertext));
         try testing.expectEqualStrings(payload, cleartext);
         try testing.expectEqual(.application_data, content_type);
+    }
+    {
+        const payload = "pong";
+        @memcpy(buffer[record.header_len..][0..payload.len], payload);
+        const enc_len = try client_cipher.AES_256_GCM_SHA384.encryptApplication(&buffer, payload.len);
+        const cleartext = try server_cipher.AES_256_GCM_SHA384.decryptRecordInPlace(buffer[0..enc_len]);
+        try testing.expectEqualStrings(payload, cleartext);
     }
     {
         const close_notify = &proto.Alert.closeNotify();

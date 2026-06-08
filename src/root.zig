@@ -76,6 +76,8 @@ inline fn streamToRaderWriter(stream: anytype) struct { *Io.Reader, *Io.Writer }
 }
 
 pub const Cipher = @import("cipher.zig").Cipher;
+pub const Record = @import("record.zig").Record;
+pub const record_header_len = @import("record.zig").header_len;
 pub const config = struct {
     pub const proto = @import("protocol.zig");
     const common = @import("handshake_common.zig");
@@ -222,4 +224,6 @@ test {
     _ = @import("cipher_names.zig");
     _ = @import("session_ticket.zig");
     _ = @import("ktls_linux.zig");
+    _ = @import("ffdhe.zig");
+    _ = @import("aes_gcm_cached.zig");
 }
