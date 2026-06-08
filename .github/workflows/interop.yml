@@ -1,0 +1,48 @@
+name: Interop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  bench-baseline:
+    name: Benchmark baseline (non-gating)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0-dev.56+a8226cd53'
+      - run: zig build bench -Doptimize=ReleaseFast
+      - run: zig build test
+
+  fuzz-build:
+    name: Fuzz target build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0-dev.56+a8226cd53'
+      - run: zig build -Dfuzz=true fuzz
+
+  testssl:
+    name: testssl.sh interop (manual trigger)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0-dev.56+a8226cd53'
+      - name: Install testssl.sh
+        run: |
+          git clone --depth 1 https://github.com/drwetter/testssl.sh.git /tmp/testssl.sh
+          sudo ln -s /tmp/testssl.sh/testssl.sh /usr/local/bin/testssl.sh
+      - name: Note
+        run: |
+          echo "Run testssl.sh against a deployed zig-tls server on port 8443."
+          echo "See docs/AUDIT_PREP.md for full interop checklist."
