@@ -24,7 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8300 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6500 /s** | ~6500 /s | **~1.00×** |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6000 /s** | ~6500 /s | **~0.92–1.00×** |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~1600 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8800 MB/s** | ~8800 MB/s | **~1.00×** |
 | Transfer recv AES-128-GCM (16 KiB) | **~8100 MB/s** | ~8300 MB/s | ~0.98× |
 | Transfer send AES-256-GCM (16 KiB) | ~7700 MB/s | ~8000 MB/s | ~0.97× |
@@ -55,7 +56,9 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 ### zig-tls (`bench/main.zig`)
 
 - X25519-only, TLS 1.3-only, HelloRetryRequest disabled.
-- Client uses `insecure_skip_verify = true` (matches BoringSSL `SSL_VERIFY_NONE`).
+- Client uses `insecure_skip_verify = true` for the default cert row (matches BoringSSL
+  `SSL_VERIFY_NONE`). A separate row enables hostname + chain verification against the
+  bench self-signed CA (`localhost`).
 - Transfer uses monomorphized `encryptApplication` + in-place `decryptRecordInPlace`.
 
 ### BoringSSL (`bench/boringssl_bench.cc`)
@@ -73,7 +76,8 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **P-256 ECDSA:** BoringSSL `ecp_nistz256` field/scalar Montgomery kernels on AArch64;
   fiat ADX + ord kernels on x86_64 (`src/crypto/p256_*`, `hw_p256.zig`).
 - **Client cert verify:** parsed leaf public keys cached in `CertificateParser` (ECDSA,
-  Ed25519, RSA) to avoid re-parsing on `CertificateVerify`.
+  Ed25519, RSA) to avoid re-parsing on `CertificateVerify`; ECDSA verify uses
+  `verifyPrehashed` (same digest path as `signPrehashed` on the server).
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.
 - **nistz base-point table:** Gueron–Krasnov 37×64 affine precompute (`p256/nistz_table.zig`)

@@ -61,6 +61,17 @@ pub fn main(init: std.process.Init) !void {
     };
     try benchHandshake(init.io, stdout, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert)");
 
+    const verify_client_opt = tls.config.Client{
+        .host = "localhost",
+        .root_ca = cert_key.bundle,
+        .insecure_skip_verify = false,
+        .cipher_suites = bench_cipher_128,
+        .named_groups = bench_groups,
+        .min_version = .tls_1_3,
+        .max_version = .tls_1_3,
+    };
+    try benchHandshakeVerify(init.io, stdout, verify_client_opt, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert + verify)");
+
     try benchTransfer(init.io, stdout, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto send (AES-128)");
     try benchTransferRecv(init.io, stdout, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto recv (AES-128)");
     try benchTransfer(init.io, stdout, bench_cipher_256, .AES_256_GCM_SHA384, "transfer TLS 1.3 record crypto send (AES-256)");
@@ -85,10 +96,14 @@ fn pumpHandshake(cli: *tls.nonblock.Client, srv: *tls.nonblock.Server) !void {
 }
 
 fn benchHandshake(io: Io, w: anytype, server_opt: tls.config.Server, label: []const u8) !void {
+    try benchHandshakeVerify(io, w, bench_client_opt, server_opt, label);
+}
+
+fn benchHandshakeVerify(io: Io, w: anytype, client_opt: tls.config.Client, server_opt: tls.config.Server, label: []const u8) !void {
     const start = benchTime(io);
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
-        var cli = tls.nonblock.Client.init(bench_client_opt);
+        var cli = tls.nonblock.Client.init(client_opt);
         var srv = tls.nonblock.Server.init(server_opt);
         try pumpHandshake(&cli, &srv);
     }

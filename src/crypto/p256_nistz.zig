@@ -34,7 +34,6 @@ fn boothRecodeW7(in: u64) u64 {
 }
 
 fn selectAffine(row: table.Row, idx: usize, row_i: usize) table.AffineMont {
-    // Row 36 is the top window (4 bits); rows 0..35 use the full 64-entry table.
     const limit: usize = if (row_i == 36) 16 else 64;
     if (idx >= limit) return .{ .x = @splat(0), .y = @splat(0) };
     return row[idx];
@@ -50,7 +49,6 @@ pub fn mulBase(s: [32]u8) IdentityElementError!P256 {
         const row_i: usize = @intCast(i);
         const wvalue = boothRecodeW7(loadWindow(s, row_i));
         const mag: usize = @intCast(wvalue >> 1);
-
         if (mag == 0) continue;
 
         const pt = selectAffine(table.ecp_nistz256_precomputed[row_i], mag - 1, row_i);
@@ -68,6 +66,12 @@ pub fn mulBase(s: [32]u8) IdentityElementError!P256 {
 
     try ret.rejectIdentity();
     return ret;
+}
+
+test "addMixed from identity yields table point" {
+    const g = P256.basePoint.affineCoordinates();
+    const r = P256.identityElement.addMixed(g);
+    try std.testing.expect(r.equivalent(P256.basePoint));
 }
 
 test "nistz mulBase matches mulPublic" {

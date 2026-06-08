@@ -534,14 +534,18 @@ pub const CertificateParser = struct {
                 if (h.pub_key_algo.X9_62_id_ecPublicKey != .X9_62_prime256v1) return error.TlsUnknownSignatureScheme;
                 const key = h.ecdsa_p256_pk orelse try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
                 const sig = try EcdsaP256Sha256.Signature.fromDer(h.signature);
-                try sig.verify(verify_bytes, key);
+                var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+                crypto.hash.sha2.Sha256.hash(verify_bytes, &digest, .{});
+                try sig.verifyPrehashed(digest, key);
             },
             .ecdsa_secp384r1_sha384 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
                 if (h.pub_key_algo.X9_62_id_ecPublicKey != .secp384r1) return error.TlsUnknownSignatureScheme;
                 const key = h.ecdsa_p384_pk orelse try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key);
                 const sig = try EcdsaP384Sha384.Signature.fromDer(h.signature);
-                try sig.verify(verify_bytes, key);
+                var digest: [crypto.hash.sha2.Sha384.digest_length]u8 = undefined;
+                crypto.hash.sha2.Sha384.hash(verify_bytes, &digest, .{});
+                try sig.verifyPrehashed(digest, key);
             },
             .ed25519 => {
                 if (h.pub_key_algo != .curveEd25519) return error.TlsBadSignatureScheme;
