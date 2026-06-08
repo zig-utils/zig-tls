@@ -4,6 +4,7 @@ const mem = std.mem;
 const meta = std.meta;
 
 const nistz_base = @import("p256_nistz.zig");
+const coord = @import("p256_coord.zig");
 
 const EncodingError = crypto.errors.EncodingError;
 const IdentityElementError = crypto.errors.IdentityElementError;
@@ -222,6 +223,24 @@ pub const P256 = struct {
             .z = Z3,
         };
         ret.cMov(p, @intFromBool(q.x.isZero()));
+        return ret;
+    }
+
+    /// Variable-time mixed add using Bedrock coord math when hw is available.
+    pub fn addMixedVarTime(p: P256, q: AffineCoordinates) P256 {
+        if (@inComptime() or !coord.hw.enabled) return addMixed(p, q);
+        if (q.x.isZero()) return p;
+
+        const pj: [3]coord.Coord = .{ p.x.limbs, p.y.limbs, p.z.limbs };
+        const qj: [2]coord.Coord = .{ q.x.limbs, q.y.limbs };
+        var out: [3]coord.Coord = undefined;
+        const ok = coord.addMixedAffine(&out, pj, qj);
+        var ret = P256{
+            .x = .{ .limbs = out[0] },
+            .y = .{ .limbs = out[1] },
+            .z = .{ .limbs = out[2] },
+        };
+        ret.cMov(p, @intFromBool(!ok));
         return ret;
     }
 
