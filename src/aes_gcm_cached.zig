@@ -195,6 +195,25 @@ test "CachedAesGcm matches std" {
     try testing.expectEqualSlices(u8, &tag_std, &tag_cached);
 }
 
+test "CachedAesGcm encryptTls13 matches generic" {
+    const Cached = CachedAesGcm(crypto.core.aes.Aes128);
+    var key: [16]u8 = undefined;
+    @memset(&key, 0x55);
+    var ctx = Cached.fromKey(key);
+    var npub: [12]u8 = undefined;
+    @memset(&npub, 0xaa);
+    const m = "sixteen bytes!!!";
+    var ad: [5]u8 = .{ 0x17, 0x03, 0x03, 0x00, 0x11 };
+    var c_tls: [m.len]u8 = undefined;
+    var tag_tls: [16]u8 = undefined;
+    var c_gen: [m.len]u8 = undefined;
+    var tag_gen: [16]u8 = undefined;
+    ctx.encryptTls13(&c_tls, &tag_tls, m, &ad, npub);
+    ctx.encrypt(&c_gen, &tag_gen, m, &ad, npub);
+    try testing.expectEqualSlices(u8, &c_tls, &c_gen);
+    try testing.expectEqualSlices(u8, &tag_tls, &tag_gen);
+}
+
 test "CachedAesGcm roundtrip" {
     const Cached = CachedAesGcm(crypto.core.aes.Aes128);
     var key: [Cached.key_length]u8 = undefined;

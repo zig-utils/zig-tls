@@ -118,6 +118,95 @@ pub const nonblock = struct {
 
 pub const Ktls = @import("Ktls.zig");
 
+fn pumpNonblockHandshake(cli: *nonblock.Client, srv: *nonblock.Server) !void {
+    var cs_buf: [max_ciphertext_record_len]u8 = undefined;
+    var sc_buf: [max_ciphertext_record_len]u8 = undefined;
+
+    var cr = try cli.run(&.{}, &cs_buf);
+    var sr = try srv.run(cr.send, &sc_buf);
+    while (!cli.done()) {
+        cr = try cli.run(sr.send, &cs_buf);
+        sr = try srv.run(cr.send, &sc_buf);
+    }
+}
+
+test "0-RTT early data server decrypt" {
+    const testing = @import("std").testing;
+    const allocator = testing.allocator;
+    const SessionResumption = @import("handshake_client.zig").Options.SessionResumption;
+
+    const groups = &[_]config.NamedGroup{.x25519};
+    const ciphers = &[_]config.CipherSuite{.AES_128_GCM_SHA256};
+    const keys = session_ticket.TicketKeys.random();
+
+    var master_secret: [48]u8 = @splat(0xCD);
+    const state: session_ticket.SessionState = .{
+        .tls_version = .tls_1_3,
+        .cipher_suite = .AES_128_GCM_SHA256,
+        .named_group = .x25519,
+        .master_secret = master_secret,
+        .session_timeout_secs = 3600,
+    };
+    var mgr = session_ticket.Manager.init(keys);
+    const issued = try mgr.issueTicket(allocator, state);
+    defer allocator.free(issued.identity);
+
+    var resumption = SessionResumption.init(allocator);
+    defer resumption.deinit();
+    const secret_idx = try resumption.appendSecret(.sha256, master_secret[0..32]);
+    var ticket_buf: [4096]u8 = undefined;
+    const ticket_msg = try session_ticket.makeNewSessionTicket(
+        &ticket_buf,
+        issued.lifetime,
+        issued.age_add,
+        issued.nonce,
+        issued.identity,
+    );
+    try resumption.pushTicket(ticket_msg, secret_idx);
+
+    const server_opt = config.Server{
+        .auth = null,
+        .cipher_suites = ciphers,
+        .named_groups = groups,
+        .session_tickets = .{ .keys = keys },
+        .send_hello_retry_for_preferred_group = false,
+        .min_version = .tls_1_3,
+        .max_version = .tls_1_3,
+    };
+    const early_payload = "early-secret-payload";
+    const client_opt = config.Client{
+        .host = "localhost",
+        .root_ca = .empty,
+        .insecure_skip_verify = true,
+        .cipher_suites = ciphers,
+        .named_groups = groups,
+        .session_resumption = &resumption,
+        .early_data = early_payload,
+        .min_version = .tls_1_3,
+        .max_version = .tls_1_3,
+    };
+
+    var cs_buf: [max_ciphertext_record_len]u8 = undefined;
+    var sc_buf: [max_ciphertext_record_len]u8 = undefined;
+    var cli = nonblock.Client.init(client_opt);
+    var srv = nonblock.Server.init(server_opt);
+
+    const cr = try cli.run(&.{}, &cs_buf);
+    const sr = try srv.run(cr.send, &sc_buf);
+    try testing.expect(srv.inner.accept_early_data);
+    try testing.expect(srv.inner.psk_resumed);
+    try testing.expectEqualStrings(early_payload, srv.earlyData());
+
+    var cli_res = cr;
+    var srv_res = sr;
+    while (!cli.done()) {
+        cli_res = try cli.run(srv_res.send, &cs_buf);
+        srv_res = try srv.run(cli_res.send, &sc_buf);
+    }
+    try testing.expect(cli.done());
+    try testing.expect(srv.done());
+}
+
 test "nonblock handshake and connection" {
     const testing = @import("std").testing;
 

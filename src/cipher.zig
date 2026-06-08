@@ -1229,6 +1229,12 @@ test testCiphers {
         try testing.expectEqualStrings(payload, cleartext);
     }
     {
+        const payload = "transfer-roundtrip";
+        @memcpy(buffer[record.header_len..][0..payload.len], payload);
+        const cleartext = try Cipher.transferApplication(&client_cipher, &server_cipher, &buffer, payload.len);
+        try testing.expectEqualStrings(payload, cleartext);
+    }
+    {
         const close_notify = &proto.Alert.closeNotify();
         const ciphertext = try client_cipher.encrypt(&buffer, .alert, close_notify);
 
