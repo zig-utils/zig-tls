@@ -12,7 +12,7 @@ const rsa = @import("rsa/rsa.zig");
 const proto = @import("protocol.zig");
 
 const X25519 = crypto.dh.X25519;
-const EcdsaP256Sha256 = crypto.sign.ecdsa.EcdsaP256Sha256;
+const EcdsaP256Sha256 = @import("crypto/ecdsa_p256.zig").EcdsaP256Sha256;
 const EcdsaP384Sha384 = crypto.sign.ecdsa.EcdsaP384Sha384;
 const MLKem768 = crypto.kem.ml_kem.MLKem768;
 
@@ -356,7 +356,14 @@ pub const CertificateBuilder = struct {
                             h.transcript.serverCertificateVerify()
                         else
                             h.transcript.clientCertificateVerify();
-                        break :blk try key_pair.sign(verify_bytes, null);
+                        const Hash = switch (comptime_scheme) {
+                            .ecdsa_secp256r1_sha256 => crypto.hash.sha2.Sha256,
+                            .ecdsa_secp384r1_sha384 => crypto.hash.sha2.Sha384,
+                            else => unreachable,
+                        };
+                        var digest: [Hash.digest_length]u8 = undefined;
+                        Hash.hash(verify_bytes, &digest, .{});
+                        break :blk try key_pair.signPrehashed(digest, null);
                     },
                     else => unreachable,
                 };
@@ -419,6 +426,12 @@ pub const CertificateParser = struct {
     signature_buf: [1024]u8 = undefined,
     signature: []const u8 = undefined,
 
+    /// Parsed leaf public keys (avoid re-parsing SEC1/DER on CertificateVerify).
+    ecdsa_p256_pk: ?EcdsaP256Sha256.PublicKey = null,
+    ecdsa_p384_pk: ?EcdsaP384Sha384.PublicKey = null,
+    ed25519_pk: ?crypto.sign.Ed25519.PublicKey = null,
+    rsa_pk: ?rsa.PublicKey = null,
+
     root_ca: Certificate.Bundle,
     host: []const u8,
     skip_verify: bool = false,
@@ -476,6 +489,7 @@ pub const CertificateParser = struct {
                 }
                 h.pub_key = try dupe(&h.pub_key_buf, subject.pubKey());
                 h.pub_key_algo = subject.pub_key_algo;
+                try h.cacheParsedPublicKey();
                 last_cert = subject;
             }
             if (!h.skip_verify) {
@@ -497,30 +511,44 @@ pub const CertificateParser = struct {
         h.signature = try dupe(&h.signature_buf, try d.slice(try d.decode(u16)));
     }
 
+    fn cacheParsedPublicKey(h: *CertificateParser) !void {
+        switch (h.pub_key_algo) {
+            .X9_62_id_ecPublicKey => |curve| switch (curve) {
+                .X9_62_prime256v1 => h.ecdsa_p256_pk = try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key),
+                .secp384r1 => h.ecdsa_p384_pk = try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key),
+                else => {},
+            },
+            .curveEd25519 => {
+                if (h.pub_key.len != crypto.sign.Ed25519.PublicKey.encoded_length) return error.InvalidEncoding;
+                h.ed25519_pk = try crypto.sign.Ed25519.PublicKey.fromBytes(h.pub_key[0..crypto.sign.Ed25519.PublicKey.encoded_length].*);
+            },
+            .rsaEncryption => h.rsa_pk = try rsa.PublicKey.fromDer(h.pub_key),
+            else => {},
+        }
+    }
+
     pub fn verifySignature(h: *CertificateParser, verify_bytes: []const u8) !void {
         switch (h.signature_scheme) {
-            inline .ecdsa_secp256r1_sha256,
-            .ecdsa_secp384r1_sha384,
-            => |comptime_scheme| {
+            .ecdsa_secp256r1_sha256 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
-                const cert_named_curve = h.pub_key_algo.X9_62_id_ecPublicKey;
-                switch (cert_named_curve) {
-                    inline .secp384r1, .X9_62_prime256v1 => |comptime_cert_named_curve| {
-                        const Ecdsa = SchemeEcdsaCert(comptime_scheme, comptime_cert_named_curve);
-                        const key = try Ecdsa.PublicKey.fromSec1(h.pub_key);
-                        const sig = try Ecdsa.Signature.fromDer(h.signature);
-                        try sig.verify(verify_bytes, key);
-                    },
-                    else => return error.TlsUnknownSignatureScheme,
-                }
+                if (h.pub_key_algo.X9_62_id_ecPublicKey != .X9_62_prime256v1) return error.TlsUnknownSignatureScheme;
+                const key = h.ecdsa_p256_pk orelse try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
+                const sig = try EcdsaP256Sha256.Signature.fromDer(h.signature);
+                try sig.verify(verify_bytes, key);
+            },
+            .ecdsa_secp384r1_sha384 => {
+                if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
+                if (h.pub_key_algo.X9_62_id_ecPublicKey != .secp384r1) return error.TlsUnknownSignatureScheme;
+                const key = h.ecdsa_p384_pk orelse try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key);
+                const sig = try EcdsaP384Sha384.Signature.fromDer(h.signature);
+                try sig.verify(verify_bytes, key);
             },
             .ed25519 => {
                 if (h.pub_key_algo != .curveEd25519) return error.TlsBadSignatureScheme;
                 const Eddsa = crypto.sign.Ed25519;
                 if (h.signature.len != Eddsa.Signature.encoded_length) return error.InvalidEncoding;
                 const sig = Eddsa.Signature.fromBytes(h.signature[0..Eddsa.Signature.encoded_length].*);
-                if (h.pub_key.len != Eddsa.PublicKey.encoded_length) return error.InvalidEncoding;
-                const key = try Eddsa.PublicKey.fromBytes(h.pub_key[0..Eddsa.PublicKey.encoded_length].*);
+                const key = h.ed25519_pk orelse try Eddsa.PublicKey.fromBytes(h.pub_key[0..Eddsa.PublicKey.encoded_length].*);
                 try sig.verify(verify_bytes, key);
             },
             inline .rsa_pss_rsae_sha256,
@@ -529,7 +557,7 @@ pub const CertificateParser = struct {
             => |comptime_scheme| {
                 if (h.pub_key_algo != .rsaEncryption) return error.TlsBadSignatureScheme;
                 const Hash = SchemeHash(comptime_scheme);
-                const pk = try rsa.PublicKey.fromDer(h.pub_key);
+                const pk = h.rsa_pk orelse try rsa.PublicKey.fromDer(h.pub_key);
                 const sig = rsa.Pss(Hash).Signature{ .bytes = h.signature };
                 try sig.verify(verify_bytes, pk, null);
             },
@@ -540,7 +568,7 @@ pub const CertificateParser = struct {
             => |comptime_scheme| {
                 if (h.pub_key_algo != .rsaEncryption) return error.TlsBadSignatureScheme;
                 const Hash = SchemeHash(comptime_scheme);
-                const pk = try rsa.PublicKey.fromDer(h.pub_key);
+                const pk = h.rsa_pk orelse try rsa.PublicKey.fromDer(h.pub_key);
                 const sig = rsa.PKCS1v1_5(Hash).Signature{ .bytes = h.signature };
                 try sig.verify(verify_bytes, pk);
             },
@@ -548,17 +576,6 @@ pub const CertificateParser = struct {
         }
     }
 
-    fn SchemeEcdsaCert(comptime scheme: proto.SignatureScheme, comptime cert_named_curve: Certificate.NamedCurve) type {
-        const Sha256 = crypto.hash.sha2.Sha256;
-        const Sha384 = crypto.hash.sha2.Sha384;
-        const Ecdsa = crypto.sign.ecdsa.Ecdsa;
-
-        return switch (scheme) {
-            .ecdsa_secp256r1_sha256 => Ecdsa(cert_named_curve.Curve(), Sha256),
-            .ecdsa_secp384r1_sha384 => Ecdsa(cert_named_curve.Curve(), Sha384),
-            else => @compileError("bad scheme"),
-        };
-    }
 };
 
 pub fn SchemeHash(comptime scheme: proto.SignatureScheme) type {
