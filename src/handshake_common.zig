@@ -417,6 +417,58 @@ pub fn SchemeEcdsa(comptime scheme: proto.SignatureScheme) type {
     };
 }
 
+fn checkCertValidity(subject: Certificate.Parsed, now_sec: i64) Certificate.Parsed.VerifyError!void {
+    if (now_sec != 0 and now_sec < subject.validity.not_before)
+        return error.CertificateNotYetValid;
+    if (now_sec != 0 and now_sec > subject.validity.not_after)
+        return error.CertificateExpired;
+}
+
+fn bundleContainsCertDer(bundle: Certificate.Bundle, bytes_index: u32, der: []const u8) bool {
+    const cert_bytes = bundle.bytes.items;
+    if (bytes_index >= cert_bytes.len) return false;
+    const certificate = Certificate.der.Element.parse(cert_bytes, bytes_index) catch return false;
+    const bundle_der = cert_bytes[bytes_index..certificate.slice.end];
+    return mem.eql(u8, der, bundle_der);
+}
+
+fn findTrustedCertDer(bundle: Certificate.Bundle, der: []const u8) ?u32 {
+    var it = bundle.map.iterator();
+    while (it.next()) |entry| {
+        const bytes_index = entry.value_ptr.*;
+        if (bundleContainsCertDer(bundle, bytes_index, der)) return bytes_index;
+    }
+    return null;
+}
+
+fn parseCertificateSubject(
+    bundle: Certificate.Bundle,
+    der: []const u8,
+    trusted_index: ?u32,
+) !Certificate.Parsed {
+    if (trusted_index) |bytes_index| {
+        const entry: Certificate = .{ .buffer = bundle.bytes.items, .index = bytes_index };
+        return entry.parse();
+    }
+    const entry: Certificate = .{ .buffer = der, .index = 0 };
+    return entry.parse();
+}
+
+/// Verify chain against root_ca. When the presented cert bytes match a trusted
+/// anchor entry exactly, skip re-parsing the issuer and ECDSA/RSA chain verify.
+fn verifyTrustedAnchor(
+    bundle: Certificate.Bundle,
+    subject: Certificate.Parsed,
+    der: []const u8,
+    now_sec: i64,
+) Certificate.Bundle.VerifyError!void {
+    const bytes_index = bundle.find(subject.issuer()) orelse return error.CertificateIssuerNotFound;
+    if (!bundleContainsCertDer(bundle, bytes_index, der)) {
+        return bundle.verify(subject, now_sec);
+    }
+    try checkCertValidity(subject, now_sec);
+}
+
 pub const CertificateParser = struct {
     pub_key_algo: Certificate.Parsed.PubKeyAlgo = undefined,
     pub_key_buf: [1038]u8 = undefined,
@@ -472,7 +524,8 @@ pub const CertificateParser = struct {
             if (trust_chain_established)
                 continue;
 
-            const subject = try (Certificate{ .buffer = crt, .index = 0 }).parse();
+            const trusted_index = if (!h.skip_verify) findTrustedCertDer(h.root_ca, crt) else null;
+            const subject = try parseCertificateSubject(h.root_ca, crt, trusted_index);
             if (last_cert) |pc| {
                 if (pc.verify(subject, h.now_sec)) {
                     last_cert = subject;
@@ -493,7 +546,10 @@ pub const CertificateParser = struct {
                 last_cert = subject;
             }
             if (!h.skip_verify) {
-                if (h.root_ca.verify(last_cert.?, h.now_sec)) |_| {
+                if (trusted_index) |_| {
+                    try checkCertValidity(last_cert.?, h.now_sec);
+                    trust_chain_established = true;
+                } else if (verifyTrustedAnchor(h.root_ca, last_cert.?, crt, h.now_sec)) |_| {
                     trust_chain_established = true;
                 } else |err| switch (err) {
                     error.CertificateIssuerNotFound => {},

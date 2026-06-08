@@ -25,7 +25,7 @@ cmake --build /tmp/boringssl/build -j
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8300 /s** | — | — |
 | Handshake TLS 1.3 (ECDHE + cert) | **~6000 /s** | ~6500 /s | **~0.92–1.00×** |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~1600 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~2800 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8800 MB/s** | ~8800 MB/s | **~1.00×** |
 | Transfer recv AES-128-GCM (16 KiB) | **~8100 MB/s** | ~8300 MB/s | ~0.98× |
 | Transfer send AES-256-GCM (16 KiB) | ~7700 MB/s | ~8000 MB/s | ~0.97× |
@@ -78,6 +78,9 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **Client cert verify:** parsed leaf public keys cached in `CertificateParser` (ECDSA,
   Ed25519, RSA) to avoid re-parsing on `CertificateVerify`; ECDSA verify uses
   `verifyPrehashed` (same digest path as `signPrehashed` on the server).
+- **Trusted-anchor fast path:** when a presented cert is byte-identical to an entry in
+  `root_ca`, skip issuer re-parse and chain signature verification; parse from bundle
+  bytes instead of the TLS message buffer.
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.
 - **nistz base-point table:** Gueron–Krasnov 37×64 affine precompute (`p256/nistz_table.zig`)
