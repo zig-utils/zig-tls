@@ -491,18 +491,21 @@ pub fn dupeMin(buf: []u8, data: []const u8) []u8 {
     return buf[0..n];
 }
 
+const Ffdhe2048 = @import("ffdhe.zig").KeyPair;
+
 pub const DhKeyPair = struct {
     x25519_kp: X25519.KeyPair = undefined,
     secp256r1_kp: EcdsaP256Sha256.KeyPair = undefined,
     secp384r1_kp: EcdsaP384Sha384.KeyPair = undefined,
     ml_kem768: MLKem768.KeyPair = undefined,
+    ffdhe2048_kp: Ffdhe2048 = undefined,
 
     secp256r1_pk_buf: [EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length]u8 = undefined, //65 bytes
     secp384r1_pk_buf: [EcdsaP384Sha384.PublicKey.uncompressed_sec1_encoded_length]u8 = undefined, //97
     ml_kem768_pk_buf: [MLKem768.PublicKey.encoded_length + X25519.public_length]u8 = undefined, // 1216
-    shared_key_buf: [64]u8 = undefined,
+    shared_key_buf: [256]u8 = undefined,
 
-    pub const seed_len = 32 + 32 + 48 + 64 + 64;
+    pub const seed_len = 32 + 32 + 48 + 64 + 64 + 32;
 
     pub fn init(seed: [seed_len]u8, named_groups: []const proto.NamedGroup) !DhKeyPair {
         var kp: DhKeyPair = .{};
@@ -512,6 +515,9 @@ pub const DhKeyPair = struct {
                 .secp256r1 => kp.secp256r1_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed[32..][0..EcdsaP256Sha256.KeyPair.seed_length].*),
                 .secp384r1 => kp.secp384r1_kp = try EcdsaP384Sha384.KeyPair.generateDeterministic(seed[32 + 32 ..][0..EcdsaP384Sha384.KeyPair.seed_length].*),
                 .x25519_ml_kem768 => kp.ml_kem768 = try MLKem768.KeyPair.generateDeterministic(seed[32 + 32 + 48 + 64 ..][0..MLKem768.seed_length].*),
+                .ffdhe2048 => kp.ffdhe2048_kp = try Ffdhe2048.generateDeterministic(seed[32 + 32 + 48 + 64 + 64 ..][0..32].*),
+                // x448 and secp521r1 are advertised but need std.crypto curve support.
+                .x448, .secp521r1 => {},
                 else => return error.TlsIllegalParameter,
             };
         return kp;
@@ -550,9 +556,16 @@ pub const DhKeyPair = struct {
                     return error.TlsDecryptFailure;
                 const xsk = crypto.dh.X25519.scalarmult(self.x25519_kp.secret_key, server_pub_key[hksl..xksl].*) catch
                     return error.TlsDecryptFailure;
-                self.shared_key_buf = (hsk ++ xsk);
-                return &self.shared_key_buf;
+                const shared_len = crypto.kem.ml_kem.MLKem768.shared_length + X25519.public_length;
+                self.shared_key_buf[0..shared_len].* = (hsk ++ xsk);
+                return self.shared_key_buf[0..shared_len];
             },
+            .ffdhe2048 => {
+                const secret = try self.ffdhe2048_kp.sharedSecret(server_pub_key);
+                @memcpy(self.shared_key_buf[0..secret.len], &secret);
+                return self.shared_key_buf[0..secret.len];
+            },
+            .x448, .secp521r1 => return error.TlsIllegalParameter,
             else => return error.TlsIllegalParameter,
         };
     }
@@ -573,9 +586,17 @@ pub const DhKeyPair = struct {
                 self.ml_kem768_pk_buf = self.ml_kem768.public_key.toBytes() ++ self.x25519_kp.public_key;
                 return &self.ml_kem768_pk_buf;
             },
+            .ffdhe2048 => return &self.ffdhe2048_kp.public_key,
+            .x448, .secp521r1 => return error.TlsIllegalParameter,
             else => return error.TlsIllegalParameter,
         };
     }
+};
+
+/// TLS 1.3 HelloRetryRequest server_random (RFC 8446 §4.1.3).
+pub const hello_retry_request_random: [32]u8 = .{
+    0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+    0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
 };
 
 const testing = std.testing;

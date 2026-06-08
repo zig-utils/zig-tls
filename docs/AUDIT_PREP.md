@@ -32,6 +32,7 @@ Out of scope: `node:crypto` EVP layer, QUIC, DTLS, legacy SSLv3.
 ```bash
 zig build test
 zig build bench -Doptimize=ReleaseFast
+./bench/compare.sh            # zig-tls vs BoringSSL (see docs/BENCHMARKS.md)
 zig build -Dfuzz=true fuzz   # fuzz binaries in zig-out/bin/
 ```
 
@@ -44,10 +45,10 @@ testssl.sh --quiet --color 0 localhost:8443
 
 ## Known Limitations (document for auditor)
 
-- TLS 1.2 static RSA key exchange: server path incomplete
-- HelloRetryRequest / cookie extension: not implemented
-- 0-RTT early data: not implemented
-- FFDHE, x448, secp521r1 in handshake: enum only (except ML-KEM hybrid)
+- TLS 1.2 static RSA key exchange: server decrypt path implemented; legacy export ciphers still unsupported
+- HelloRetryRequest: implemented for preferred-group mismatch; stateless cookie is connection-scoped (16-byte random)
+- 0-RTT early data: client send + server `max_early_data` in EncryptedExtensions; server early-data record decryption is best-effort
+- FFDHE2048: implemented (RFC 7919); x448 and secp521r1 negotiate but require future `std.crypto` curve support
 
 ## Bun Integration Surface
 

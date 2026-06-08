@@ -149,6 +149,13 @@ pub const Transcript = struct {
         };
     }
 
+    /// TLS 1.3 0-RTT early traffic secret (RFC 8446 §7.3).
+    pub fn earlyTrafficSecret(t: *Transcript, side: @import("protocol.zig").Side) []const u8 {
+        return switch (t.tag) {
+            inline else => |h| @field(t, @tagName(h)).earlyTrafficSecret(side),
+        };
+    }
+
     pub fn applicationSecret(t: *Transcript) Secret {
         return switch (t.tag) {
             inline else => |h| @field(t, @tagName(h)).applicationSecret(),
@@ -313,6 +320,15 @@ fn TranscriptT(comptime Hash: type) type {
 
         fn clearPreSharedSecret(self: *Self) void {
             self.handshake_secret = null;
+        }
+
+        fn earlyTrafficSecret(self: *Self, side: @import("protocol.zig").Side) []const u8 {
+            const zeroes: [hash_length]u8 = @splat(0);
+            const early_secret = self.handshake_secret orelse Hkdf.extract(&[1]u8{0}, &zeroes);
+            const hello_hash = self.hash.peek();
+            const label: []const u8 = if (side == .client) "c e traffic" else "s e traffic";
+            self.buffer[0..hash_length].* = hkdfExpandLabel(Hkdf, early_secret, label, hello_hash, hash_length);
+            return self.buffer[0..hash_length];
         }
 
         fn handshakeSecret(self: *Self, shared_key: []const u8) Transcript.Secret {

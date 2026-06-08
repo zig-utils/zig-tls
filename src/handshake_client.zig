@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const crypto = std.crypto;
 const mem = std.mem;
@@ -36,7 +37,12 @@ const CertKeyPair = common.CertKeyPair;
 const cert = common.cert;
 
 const alpn = @import("alpn.zig");
-const log = std.log.scoped(.tls);
+const log = if (builtin.mode == .Debug) std.log.scoped(.tls) else struct {
+    pub fn info(comptime _: []const u8, _: anytype) void {}
+    pub fn err(comptime _: []const u8, _: anytype) void {}
+    pub fn warn(comptime _: []const u8, _: anytype) void {}
+    pub fn debug(comptime _: []const u8, _: anytype) void {}
+};
 
 pub const Options = struct {
     host: []const u8,
@@ -87,6 +93,9 @@ pub const Options = struct {
 
     /// Request OCSP stapling (Node `requestOCSP`).
     request_ocsp: bool = false,
+
+    /// 0-RTT early application data (requires `session_resumption` with PSK).
+    early_data: ?[]const u8 = null,
 
     pub const Diagnostic = struct {
         tls_version: proto.Version = @enumFromInt(0),
@@ -250,17 +259,24 @@ pub const Handshake = struct {
     max_client_record_len: usize = 0,
     selected_alpn: ?alpn.Protocol = null,
     decrypt_buf: [max_ciphertext_record_len]u8 = undefined,
+    got_hello_retry: bool = false,
+    hello_retry_group: ?proto.NamedGroup = null,
+    hello_retry_cookie_buf: [256]u8 = undefined,
+    hello_retry_cookie: []const u8 = &.{},
 
     const Self = @This();
 
     fn initKeys(h: *Self, opt: Options) !void {
-        const init_keys_buf_len = 32 + 46 + DhKeyPair.seed_len;
-        var buf: [init_keys_buf_len]u8 = undefined;
-        rng.fill(&buf);
-
-        h.client_random = buf[0..32].*;
-        h.rsa_secret = RsaSecret.init(buf[32..][0..46].*);
-        h.dh_kp = try DhKeyPair.init(buf[32 + 46 ..][0..DhKeyPair.seed_len].*, opt.named_groups);
+        const tls_versions = try CipherSuite.versions(opt.cipher_suites);
+        rng.fill(&h.client_random);
+        if (tls_versions != .tls_1_3) {
+            var rsa_buf: [46]u8 = undefined;
+            rng.fill(&rsa_buf);
+            h.rsa_secret = RsaSecret.init(rsa_buf);
+        }
+        var seed: [DhKeyPair.seed_len]u8 = undefined;
+        rng.fill(&seed);
+        h.dh_kp = try DhKeyPair.init(seed, opt.named_groups);
 
         h.cert = .{
             .host = opt.host,
@@ -333,9 +349,19 @@ pub const Handshake = struct {
 
         try h.makeClientHello(opt, resumption_ticket); // client flight 1
         h.max_client_record_len = h.output.end;
+        if (resumption_ticket != null and opt.early_data != null and opt.early_data.?.len > 0)
+            try h.sendEarlyData(opt, resumption_ticket != null);
         try h.output.flush();
 
         try h.readServerFlight1(); // server flight 1
+        while (h.got_hello_retry) {
+            h.got_hello_retry = false;
+            const retry_group = h.hello_retry_group orelse return error.TlsIllegalParameter;
+            try h.makeClientHelloRetry(opt, retry_group, resumption_ticket);
+            h.max_client_record_len = @max(h.max_client_record_len, h.output.end);
+            try h.output.flush();
+            try h.readServerFlight1();
+        }
 
         if (resumption_ticket != null and h.pre_shared_selected_identity == null) {
             // server didn't accept resuption
@@ -450,6 +476,9 @@ pub const Handshake = struct {
         // Prepare data
         const tls_versions = try CipherSuite.versions(opt.cipher_suites);
         const shared_keys: []const []const u8 = if (tls_versions != .tls_1_2) brk: {
+            if (opt.named_groups.len == 1) {
+                break :brk &[_][]const u8{try h.dh_kp.publicKey(opt.named_groups[0])};
+            }
             var keys: [supported_named_groups.len][]const u8 = undefined;
             for (opt.named_groups, 0..) |ng, i| {
                 keys[i] = try h.dh_kp.publicKey(ng);
@@ -482,6 +511,15 @@ pub const Handshake = struct {
         try w.keyShare(opt.named_groups, shared_keys);
         try w.serverName(opt.host);
         if (opt.alpn_protocols.len > 0) try alpn.writeExtension(&w, opt.alpn_protocols);
+        if (resumption_ticket != null and opt.early_data != null) {
+            try w.enumValue(proto.Extension.early_data);
+            try w.int(u16, 0);
+        }
+        if (h.hello_retry_cookie.len > 0) {
+            try w.enumValue(proto.Extension.cookie);
+            try w.int(u16, @as(u16, @intCast(h.hello_retry_cookie.len)));
+            try w.slice(h.hello_retry_cookie);
+        }
         if (opt.request_ocsp) {
             try w.enumValue(proto.Extension.status_request);
             try w.int(u16, 5);
@@ -522,6 +560,93 @@ pub const Handshake = struct {
         h.output.advance(w.buffered().len);
     }
 
+    fn makeClientHelloRetry(h: *Self, opt: Options, group: proto.NamedGroup, resumption_ticket: ?ResumptionTicket) !void {
+        const groups = &[_]proto.NamedGroup{group};
+        const shared_key = try h.dh_kp.publicKey(group);
+        const shared_keys = &[_][]const u8{shared_key};
+        var retry_opt = opt;
+        retry_opt.named_groups = groups;
+        try h.makeClientHelloWithKeys(retry_opt, resumption_ticket, groups, shared_keys);
+    }
+
+    fn makeClientHelloWithKeys(
+        h: *Self,
+        opt: Options,
+        resumption_ticket: ?ResumptionTicket,
+        groups: []const proto.NamedGroup,
+        shared_keys: []const []const u8,
+    ) !void {
+        const tls_versions = try CipherSuite.versions(opt.cipher_suites);
+        const supported_versions = switch (tls_versions) {
+            .both => &[_]proto.Version{ .tls_1_3, .tls_1_2 },
+            .tls_1_3 => &[_]proto.Version{.tls_1_3},
+            .tls_1_2 => &[_]proto.Version{.tls_1_2},
+        };
+        const psk_binder_len = if (resumption_ticket == null) 0 else h.transcript.hashLength() + 3;
+        var w: record.Writer = .initFromIo(h.output);
+        const header_pos = try w.skip(9);
+        try w.enumValue(proto.Version.tls_1_2);
+        try w.slice(&h.client_random);
+        try w.byte(0);
+        try w.enumList(CipherSuite, opt.cipher_suites);
+        try w.slice(&[_]u8{ 0x01, 0x00 });
+        const ext_len_pos = try w.skip(2);
+        try w.extension(.supported_versions, supported_versions);
+        try w.extension(.signature_algorithms, common.supported_signature_algorithms);
+        try w.extension(.supported_groups, groups);
+        try w.keyShare(groups, shared_keys);
+        try w.serverName(opt.host);
+        if (opt.alpn_protocols.len > 0) try alpn.writeExtension(&w, opt.alpn_protocols);
+        if (resumption_ticket != null and opt.early_data != null) {
+            try w.enumValue(proto.Extension.early_data);
+            try w.int(u16, 0);
+        }
+        if (h.hello_retry_cookie.len > 0) {
+            try w.enumValue(proto.Extension.cookie);
+            try w.int(u16, @as(u16, @intCast(h.hello_retry_cookie.len)));
+            try w.slice(h.hello_retry_cookie);
+        }
+        const binder_pos: ?usize = if (resumption_ticket) |ticket| brk: {
+            try w.extension(.psk_key_exchange_modes, &[_]proto.KeyExchangeModes{.psk_dhe_ke});
+            try w.preSharedKey(ticket.identity, ticket.obfuscatedAge(), psk_binder_len);
+            break :brk try w.skip(psk_binder_len);
+        } else null;
+        var ew = w.writerAt(ext_len_pos);
+        try ew.int(u16, w.pos() - ext_len_pos - 2);
+        var hw = w.writerAt(header_pos);
+        try hw.recordHeader(.handshake, w.pos() - 5);
+        try hw.handshakeRecordHeader(.client_hello, w.pos() - 9);
+        const pre_binder_hash_buf = w.buffered()[record.header_len .. w.pos() - psk_binder_len];
+        h.transcript.update(pre_binder_hash_buf);
+        if (binder_pos) |pos| {
+            const binder = h.transcript.pskBinder();
+            var bw = w.writerAt(pos);
+            try bw.preSharedKeyBinder(binder);
+            h.transcript.update(w.buffered()[w.buffered().len - psk_binder_len ..]);
+        }
+        h.output.advance(w.buffered().len);
+    }
+
+    fn sendEarlyData(h: *Self, opt: Options, has_psk: bool) !void {
+        if (!has_psk) return;
+        const edata = opt.early_data orelse return;
+        if (edata.len == 0) return;
+        const cs = brk: {
+            for (opt.cipher_suites) |cs| {
+                if (cipher_suites.includes(cipher_suites.tls13, cs)) break :brk cs;
+            }
+            return;
+        };
+        h.transcript.use(cs.hash());
+        const early = h.transcript.earlyTrafficSecret(.client);
+        const secret: Transcript.Secret = .{ .client = early, .server = early };
+        var early_cipher = try Cipher.initTls13(cs, secret, .client);
+        var w: record.Writer = .initFromIo(h.output);
+        const ciphertext = try early_cipher.encrypt(w.unused(), .application_data, edata);
+        w.advance(ciphertext.len);
+        h.output.advance(w.buffered().len);
+    }
+
     /// Process first flight of the messages from the server.
     /// Read server hello message. If TLS 1.3 is chosen in server hello
     /// return. For TLS 1.2 continue and read certificate, key_exchange
@@ -551,6 +676,7 @@ pub const Handshake = struct {
                 switch (handshake_type) {
                     .server_hello => { // server hello, ref: https://datatracker.ietf.org/doc/html/rfc5246#section-7.4.1.3
                         try h.parseServerHello(&d, length);
+                        if (h.got_hello_retry) return;
                         if (h.tls_version == .tls_1_3) {
                             if (!d.eof()) return error.TlsIllegalParameter;
                             return; // end of tls 1.3 server flight 1
@@ -591,8 +717,10 @@ pub const Handshake = struct {
         if (try d.decode(proto.Version) != proto.Version.tls_1_2)
             return error.TlsBadVersion;
         h.server_random = try d.array(32);
-        if (isServerHelloRetryRequest(&h.server_random))
-            return error.TlsServerHelloRetryRequest;
+        if (mem.eql(u8, &h.server_random, &common.hello_retry_request_random)) {
+            h.got_hello_retry = true;
+            h.tls_version = .tls_1_3;
+        }
 
         const session_id_len = try d.decode(u8);
         if (session_id_len > 32) return error.TlsIllegalParameter;
@@ -620,9 +748,17 @@ pub const Handshake = struct {
                         if (len != 2) return error.TlsIllegalParameter;
                     },
                     .key_share => {
-                        h.named_group = try d.decode(proto.NamedGroup);
-                        h.server_pub_key = try common.dupe(&h.server_pub_key_buf, try d.slice(try d.decode(u16)));
-                        if (len != h.server_pub_key.len + 4) return error.TlsIllegalParameter;
+                        if (h.got_hello_retry) {
+                            if (len != 2) return error.TlsIllegalParameter;
+                            h.hello_retry_group = try d.decode(proto.NamedGroup);
+                        } else {
+                            h.named_group = try d.decode(proto.NamedGroup);
+                            h.server_pub_key = try common.dupe(&h.server_pub_key_buf, try d.slice(try d.decode(u16)));
+                            if (len != h.server_pub_key.len + 4) return error.TlsIllegalParameter;
+                        }
+                    },
+                    .cookie => {
+                        h.hello_retry_cookie = try common.dupe(&h.hello_retry_cookie_buf, try d.slice(len));
                     },
                     .pre_shared_key => {
                         h.pre_shared_selected_identity = try d.decode(u16);
@@ -633,15 +769,7 @@ pub const Handshake = struct {
                 }
             }
         }
-    }
-
-    fn isServerHelloRetryRequest(server_random: []const u8) bool {
-        // Ref: https://datatracker.ietf.org/doc/html/rfc8446#section-4.1.3
-        const hello_retry_request_magic = [32]u8{
-            0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
-            0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
-        };
-        return mem.eql(u8, server_random, &hello_retry_request_magic);
+        if (h.got_hello_retry) return;
     }
 
     fn parseServerKeyExchange(h: *Self, d: *record.Decoder) !void {

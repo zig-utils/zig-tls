@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const crypto = std.crypto;
 const mem = std.mem;
@@ -26,7 +27,12 @@ const cert = common.cert;
 const rng = @import("random.zig");
 const alpn = @import("alpn.zig");
 const session_ticket = @import("session_ticket.zig");
-const log = std.log.scoped(.tls);
+const log = if (builtin.mode == .Debug) std.log.scoped(.tls) else struct {
+    pub fn info(comptime _: []const u8, _: anytype) void {}
+    pub fn err(comptime _: []const u8, _: anytype) void {}
+    pub fn warn(comptime _: []const u8, _: anytype) void {}
+    pub fn debug(comptime _: []const u8, _: anytype) void {}
+};
 
 pub const Options = struct {
     /// Server authentication. If null server will not send Certificate and
@@ -69,6 +75,12 @@ pub const Options = struct {
 
     /// OCSP stapling response to include in handshake (when provided).
     ocsp_response: ?[]const u8 = null,
+
+    /// Send HelloRetryRequest when the client key_share does not match the preferred group.
+    send_hello_retry_for_preferred_group: bool = true,
+
+    /// Maximum 0-RTT early data accepted from clients (bytes).
+    max_early_data_size: u32 = 16384,
 
     pub const SNICallback = *const fn (
         ctx: ?*anyopaque,
@@ -146,8 +158,21 @@ pub const Handshake = struct {
     master_secret: [48]u8 = undefined,
     key_material: [48 * 4]u8 = undefined,
     dh_kp: DhKeyPair = undefined,
+    dh_kp_ready: bool = false,
+
+    hello_retry_sent: bool = false,
+    hello_retry_cookie: [32]u8 = undefined,
+    hello_retry_cookie_len: u8 = 0,
+    client_cookie_buf: [256]u8 = undefined,
+    client_cookie: []const u8 = &.{},
+    accept_early_data: bool = false,
 
     const Self = @This();
+
+    fn needsHelloRetry(h: *Self, server_groups: []const proto.NamedGroup) bool {
+        if (server_groups.len == 0) return false;
+        return h.named_group != server_groups[0];
+    }
 
     fn writeAlert(h: *Self, cph: ?*Cipher, err: anyerror) !void {
         if (cph) |c| {
@@ -169,6 +194,22 @@ pub const Handshake = struct {
             try h.writeAlert(null, err);
             return err;
         };
+
+        if (h.hello_retry_sent) {
+            if (h.client_cookie.len == 0 or h.client_cookie.len != h.hello_retry_cookie_len or
+                !mem.eql(u8, h.client_cookie, h.hello_retry_cookie[0..h.hello_retry_cookie_len]))
+                return error.TlsIllegalParameter;
+        } else if (h.tls_version == .tls_1_3 and opt.send_hello_retry_for_preferred_group and
+            h.needsHelloRetry(opt.effectiveNamedGroups()))
+        {
+            try h.sendHelloRetryRequest(opt);
+            try h.output.flush();
+            h.hello_retry_sent = true;
+            h.readClientHello(opt.cipher_suites, opt.effectiveNamedGroups()) catch |err| {
+                try h.writeAlert(null, err);
+                return err;
+            };
+        }
 
         // SNI callback may override server certificate
         if (opt.sni_callback) |cb| {
@@ -230,10 +271,15 @@ pub const Handshake = struct {
             // required signature scheme in client hello
             h.signature_scheme = a.key.signature_scheme;
         }
-        // Initialize DH key pair for key exchange (used in TLS 1.2 ECDHE)
+        h.dh_kp_ready = false;
+    }
+
+    fn ensureDhKp(h: *Self, opt: Options) !void {
+        if (h.dh_kp_ready) return;
         var seed: [DhKeyPair.seed_len]u8 = undefined;
         rng.fill(&seed);
-        h.dh_kp = DhKeyPair.init(seed, opt.effectiveNamedGroups()) catch unreachable;
+        h.dh_kp = try DhKeyPair.init(seed, opt.effectiveNamedGroups());
+        h.dh_kp_ready = true;
     }
 
     pub fn selectedAlpnProtocol(h: Self) ?alpn.Protocol {
@@ -272,6 +318,7 @@ pub const Handshake = struct {
         // Debug: log the selected named_group (use info level to show in production)
         log.info("TLS 1.2 serverFlightTls12: named_group={x}, cipher_suite={x}", .{ @intFromEnum(h.named_group), @intFromEnum(h.cipher_suite) });
 
+        try h.ensureDhKp(opt);
         // Generate server's DH public key
         log.info("TLS 1.2: generating DH public key", .{});
         h.server_pub_key = try common.dupe(&h.server_pub_key_buf, try h.dh_kp.publicKey(h.named_group));
@@ -446,8 +493,46 @@ pub const Handshake = struct {
         try header_w.handshakeRecordHeader(.server_key_exchange, hw.pos() - content_start - 4);
     }
 
+    fn sendHelloRetryRequest(h: *Self, opt: Options) !void {
+        const preferred = opt.effectiveNamedGroups()[0];
+        rng.fill(&h.hello_retry_cookie);
+        h.hello_retry_cookie_len = 16;
+
+        var w: record.Writer = .initFromIo(h.output);
+        const header_pos = try w.skip(9);
+        try w.enumValue(proto.Version.tls_1_2);
+        try w.slice(&common.hello_retry_request_random);
+        try w.int(u8, h.legacy_session_id.len);
+        if (h.legacy_session_id.len > 0) try w.slice(h.legacy_session_id);
+        try w.enumValue(h.cipher_suite);
+        try w.slice(&[_]u8{0});
+        const ext_len_pos = try w.skip(2);
+        {
+            try w.enumValue(proto.Extension.supported_versions);
+            try w.int(u16, 2);
+            try w.enumValue(proto.Version.tls_1_3);
+        }
+        {
+            try w.enumValue(proto.Extension.key_share);
+            try w.int(u16, 2);
+            try w.enumValue(preferred);
+        }
+        {
+            try w.enumValue(proto.Extension.cookie);
+            try w.int(u16, h.hello_retry_cookie_len);
+            try w.slice(h.hello_retry_cookie[0..h.hello_retry_cookie_len]);
+        }
+        var ew = w.writerAt(ext_len_pos);
+        try ew.int(u16, w.pos() - ext_len_pos - 2);
+        var hw = w.writerAt(header_pos);
+        try hw.recordHeader(.handshake, w.pos() - 5);
+        try hw.handshakeRecordHeader(.server_hello, w.pos() - 9);
+        h.transcript.update(w.buffered()[record.header_len..]);
+        h.output.advance(w.buffered().len);
+    }
+
     /// TLS 1.2 client flight 2: ClientKeyExchange, ChangeCipherSpec, Finished
-    fn clientFlight2Tls12(h: *Self, _: Options) !void {
+    fn clientFlight2Tls12(h: *Self, opt: Options) !void {
         log.info("TLS 1.2 clientFlight2Tls12: starting", .{});
         // Read ClientKeyExchange
         {
@@ -482,8 +567,17 @@ pub const Handshake = struct {
                 if (client_pub_key_len != length - 1) return error.TlsDecodeError;
                 h.client_pub_key = try common.dupe(&h.client_pub_key_buf, try d.slice(client_pub_key_len));
                 log.info("TLS 1.2 clientFlight2Tls12: got client pub key, len={d}", .{h.client_pub_key.len});
+            } else if (h.cipher_suite.keyExchange() == .rsa) {
+                const enc_len = try d.decode(u16);
+                const enc = try d.slice(enc_len);
+                const auth = opt.auth orelse return error.TlsHandshakeFailure;
+                var plain_buf: [512]u8 = undefined;
+                const pre_master = try auth.key.key.rsa.decryptPkcsv1_5(enc, &plain_buf);
+                if (pre_master.len != 48) return error.TlsDecryptError;
+                if (pre_master[0] != 0x03 or pre_master[1] != 0x03) return error.TlsProtocolVersion;
+                h.transcript.masterSecret(&h.master_secret, pre_master, h.client_random, h.server_random);
+                h.transcript.keyMaterial(&h.key_material, &h.master_secret, h.client_random, h.server_random);
             } else {
-                // RSA key exchange - skip for now
                 try d.skip(length);
             }
         }
@@ -492,6 +586,7 @@ pub const Handshake = struct {
         // Generate pre-master secret and derive keys
         if (h.cipher_suite.keyExchange() == .ecdhe) {
             log.info("TLS 1.2 clientFlight2Tls12: generating shared key, named_group={x}", .{@intFromEnum(h.named_group)});
+            try h.ensureDhKp(opt);
             const pre_master_secret = try h.dh_kp.sharedKey(h.named_group, h.client_pub_key);
             log.info("TLS 1.2 clientFlight2Tls12: got pre_master_secret, len={d}", .{pre_master_secret.len});
             h.transcript.masterSecret(&h.master_secret, pre_master_secret, h.client_random, h.server_random);
@@ -586,13 +681,9 @@ pub const Handshake = struct {
     fn serverFlight(h: *Self, opt: Options) !void {
         var w: record.Writer = .initFromIo(h.output);
 
-        const shared_key = brk: {
-            var seed: [DhKeyPair.seed_len]u8 = undefined;
-            rng.fill(&seed);
-            var kp = try DhKeyPair.init(seed, &[_]proto.NamedGroup{h.named_group});
-            h.server_pub_key = try common.dupe(&h.server_pub_key_buf, try kp.publicKey(h.named_group));
-            break :brk try kp.sharedKey(h.named_group, h.client_pub_key);
-        };
+        try h.ensureDhKp(opt);
+        h.server_pub_key = try common.dupe(&h.server_pub_key_buf, try h.dh_kp.publicKey(h.named_group));
+        const shared_key = try h.dh_kp.sharedKey(h.named_group, h.client_pub_key);
         {
             const hello = try h.makeServerHello(&w);
             h.transcript.update(hello[record.header_len..]);
@@ -604,9 +695,24 @@ pub const Handshake = struct {
         try w.record(.change_cipher_spec, &[_]u8{1});
         {
             var ee_buf: [256]u8 = undefined;
-            const ee_payload = try alpn.makeEncryptedExtensionsBody(&ee_buf, h.selected_alpn);
+            var ee_w = record.Writer.init(&ee_buf);
+            var ext_bytes: usize = 0;
+            if (h.selected_alpn) |p| ext_bytes += 4 + 1 + p.len;
+            if (h.accept_early_data) ext_bytes += 4 + 4;
+            try ee_w.int(u16, ext_bytes);
+            if (h.selected_alpn) |p| {
+                try ee_w.enumValue(proto.Extension.application_layer_protocol_negotiation);
+                try ee_w.int(u16, 1 + p.len);
+                try ee_w.byte(@intCast(p.len));
+                try ee_w.slice(p);
+            }
+            if (h.accept_early_data) {
+                try ee_w.enumValue(proto.Extension.early_data);
+                try ee_w.int(u16, 4);
+                try ee_w.int(u32, opt.max_early_data_size);
+            }
             var hw = try w.writerAdvance(record.header_len);
-            try hw.handshakeRecord(.encrypted_extensions, ee_payload);
+            try hw.handshakeRecord(.encrypted_extensions, ee_w.buffered());
             h.transcript.update(hw.buffered());
             try h.writeEncrypted(&w, hw.buffered());
         }
@@ -944,6 +1050,13 @@ pub const Handshake = struct {
                 },
                 .status_request => {
                     try d.skip(extension_len);
+                },
+                .cookie => {
+                    h.client_cookie = try common.dupe(&h.client_cookie_buf, try d.slice(extension_len));
+                },
+                .early_data => {
+                    if (extension_len != 0) return error.TlsIllegalParameter;
+                    h.accept_early_data = true;
                 },
                 else => {
                     try d.skip(extension_len);
