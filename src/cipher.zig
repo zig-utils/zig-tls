@@ -50,6 +50,9 @@ pub const max_cleartext_len = 1 << 14;
 // content type, plus any expansion added by the AEAD algorithm.
 pub const max_ciphertext_len = max_cleartext_len + 256;
 pub const max_ciphertext_record_len = record.header_len + max_ciphertext_len;
+
+/// Avoid large stack frames in nested TLS 1.2 CBC decrypt paths.
+threadlocal var tls12_decrypt_scratch: [max_ciphertext_len]u8 = undefined;
 // max ciphertext produced with this implementation ()
 pub const max_encrypted_record_len = max_cleartext_len + @max(encrypt_overhead_tls_13, encrypt_overhead_tls_12);
 
@@ -667,8 +670,15 @@ fn CbcType(comptime BlockCipher: type, comptime HashType: type) type {
             // ad | ------ plaintext --------
             // ad | cleartext | mac | padding
             const plaintext = buf[additional_data_len..][0..ciphertext.len];
-            // decrypt ciphertext -> plaintext
-            CBC.init(self.decrypt_key).decrypt(plaintext, ciphertext, iv[0..iv_len].*) catch return error.TlsDecryptError;
+            // decrypt via scratch when plaintext overlaps ciphertext in rec.buffer
+            const decrypt_dst = if (plaintext.ptr == ciphertext.ptr or
+                (@intFromPtr(plaintext.ptr) < @intFromPtr(ciphertext.ptr) + ciphertext.len and
+                    @intFromPtr(ciphertext.ptr) < @intFromPtr(plaintext.ptr) + plaintext.len))
+                tls12_decrypt_scratch[0..ciphertext.len]
+            else
+                plaintext;
+            CBC.init(self.decrypt_key).decrypt(decrypt_dst, ciphertext, iv[0..iv_len].*) catch return error.TlsDecryptError;
+            if (decrypt_dst.ptr != plaintext.ptr) @memcpy(plaintext, decrypt_dst);
 
             // get padding len from last padding byte
             const padding_len = plaintext[plaintext.len - 1] + 1;
