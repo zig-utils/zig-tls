@@ -31,9 +31,9 @@ BORINGSSL_BUILD=/tmp/boringssl/build-noasm ./bench/compare.sh
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Full handshake TLS 1.3 | **~7800 /s** | ~6250 /s | **~1.25×** |
-| Transfer TLS 1.3 send (16 KiB records) | ~2275 MB/s | **~3310 MB/s** | ~0.69× |
-| Transfer TLS 1.3 recv (16 KiB records) | ~2270 MB/s | **~3320 MB/s** | ~0.68× |
+| Full handshake TLS 1.3 | **~8100 /s** | ~6600 /s | **~1.23×** |
+| Transfer TLS 1.3 send (16 KiB records) | ~2400 MB/s | **~3470 MB/s** | ~0.69× |
+| Transfer TLS 1.3 recv (16 KiB records) | ~2400 MB/s | **~3470 MB/s** | ~0.69× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
