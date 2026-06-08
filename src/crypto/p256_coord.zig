@@ -119,6 +119,46 @@ pub fn addMixedAffine(out: *[3]Coord, p: [3]Coord, q: [2]Coord) bool {
     return ok;
 }
 
+/// Jacobian point double (BoringSSL `point_double`, a = -3).
+pub fn doubleJacobian(out: *[3]Coord, p: [3]Coord) void {
+    var delta: Coord = undefined;
+    var gamma: Coord = undefined;
+    var beta: Coord = undefined;
+    var alpha: Coord = undefined;
+    var ftmp: Coord = undefined;
+    var ftmp2: Coord = undefined;
+    var tmptmp: Coord = undefined;
+    var fourbeta: Coord = undefined;
+
+    sqr(&delta, p[2]);
+    sqr(&gamma, p[1]);
+    mul(&beta, p[0], gamma);
+
+    subCoord(&ftmp, p[0], delta);
+    add(&ftmp2, p[0], delta);
+    add(&tmptmp, ftmp2, ftmp2);
+    add(&ftmp2, ftmp2, tmptmp);
+    mul(&alpha, ftmp, ftmp2);
+
+    sqr(&out[0], alpha);
+    add(&fourbeta, beta, beta);
+    add(&fourbeta, fourbeta, fourbeta);
+    add(&tmptmp, fourbeta, fourbeta);
+    subCoord(&out[0], out[0], tmptmp);
+
+    add(&delta, gamma, delta);
+    add(&ftmp, p[1], p[2]);
+    sqr(&out[2], ftmp);
+    subCoord(&out[2], out[2], delta);
+
+    subCoord(&out[1], fourbeta, out[0]);
+    add(&gamma, gamma, gamma);
+    sqr(&gamma, gamma);
+    mul(&out[1], alpha, out[1]);
+    add(&gamma, gamma, gamma);
+    subCoord(&out[1], out[1], gamma);
+}
+
 const std = @import("std");
 
 test "hw mul matches fiat mul" {
