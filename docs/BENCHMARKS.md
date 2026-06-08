@@ -31,9 +31,9 @@ BORINGSSL_BUILD=/tmp/boringssl/build-noasm ./bench/compare.sh
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Full handshake TLS 1.3 | **~8100 /s** | ~6600 /s | **~1.23×** |
-| Transfer TLS 1.3 send (16 KiB records) | ~2400 MB/s | **~3470 MB/s** | ~0.69× |
-| Transfer TLS 1.3 recv (16 KiB records) | ~2400 MB/s | **~3470 MB/s** | ~0.69× |
+| Full handshake TLS 1.3 | **~8200 /s** | ~6700 /s | **~1.23×** |
+| Transfer TLS 1.3 send (16 KiB records) | ~2380 MB/s | **~3490 MB/s** | ~0.68× |
+| Transfer TLS 1.3 recv (16 KiB records) | ~2390 MB/s | **~3460 MB/s** | ~0.69× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
@@ -74,8 +74,8 @@ BoringSSL’s `SSL_write` / `SSL_read` on top of heavily optimized assembly GCM.
   `serverFlight`, no duplicate keygen), skip TLS 1.3 RSA premaster generation, bench
   pins X25519-only (avoids ML-KEM-768 keygen per handshake).
 - **Transfer:** cached AES-GCM key schedule + GHASH subkey (`aes_gcm_cached.zig`),
-  TLS 1.3-specialized GCM (`encryptTls13` / `decryptTls13`), `encryptApplication`
-  fast path, in-place record decrypt.
+  TLS 1.3-specialized GCM (`encryptTls13` / `decryptTls13`), incremental sequence
+  nonce updates, `encryptApplication` fast path, in-place record decrypt.
 - **Bench:** `-Dcpu=native`, pinned cipher suite, dedicated pump loop, monomorphized
   AES-128-GCM transfer path.
 
