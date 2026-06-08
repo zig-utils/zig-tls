@@ -16,7 +16,18 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: '0.17.0-dev.56+a8226cd53'
-      - run: zig build bench -Doptimize=ReleaseFast
+      - run: zig build bench -Doptimize=ReleaseFast -Dcpu=native
+      - run: zig build test
+
+  bench-macos:
+    name: Benchmark baseline macOS (non-gating)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0-dev.56+a8226cd53'
+      - run: zig build bench -Doptimize=ReleaseFast -Dcpu=native
       - run: zig build test
 
   fuzz-build:
