@@ -49,7 +49,10 @@ pub fn mulBase(s: [32]u8) IdentityElementError!P256 {
         const row_i: usize = @intCast(i);
         const wvalue = boothRecodeW7(loadWindow(s, row_i));
         const mag: usize = @intCast(wvalue >> 1);
-        if (mag == 0) continue;
+        if (mag == 0) {
+            @branchHint(.unlikely);
+            continue;
+        }
 
         const pt = selectAffine(table.ecp_nistz256_precomputed[row_i], mag - 1, row_i);
         var y = feFromMontgomeryLimbs(pt.y);

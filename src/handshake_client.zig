@@ -283,6 +283,7 @@ pub const Handshake = struct {
             .root_ca = opt.root_ca,
             .skip_verify = opt.insecure_skip_verify,
         };
+        h.cert.prewarmTrustedLeaf() catch {};
     }
 
     /// Handshake exchanges messages with server to get agreement about
@@ -1421,6 +1422,8 @@ pub const NonBlock = struct {
         inner.cert.cached_leaf_ready = cert_cache.cached_leaf_ready;
         inner.cert.cached_not_before = cert_cache.cached_not_before;
         inner.cert.cached_not_after = cert_cache.cached_not_after;
+        inner.cert.cached_leaf_der_len = cert_cache.cached_leaf_der_len;
+        inner.cert.prewarmed_trusted_index = cert_cache.prewarmed_trusted_index;
         if (cert_cache.cached_leaf_ready) {
             inner.cert.pub_key_algo = cert_cache.pub_key_algo;
             inner.cert.ecdsa_p256_pk = cert_cache.ecdsa_p256_pk;

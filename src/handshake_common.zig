@@ -424,6 +424,20 @@ fn checkCertValidity(subject: Certificate.Parsed, now_sec: i64) Certificate.Pars
         return error.CertificateExpired;
 }
 
+fn checkCertValidityCached(h: *const CertificateParser) Certificate.Parsed.VerifyError!void {
+    if (h.now_sec != 0 and h.now_sec < h.cached_not_before)
+        return error.CertificateNotYetValid;
+    if (h.now_sec != 0 and h.now_sec > h.cached_not_after)
+        return error.CertificateExpired;
+}
+
+fn bundleDerSpan(bundle: Certificate.Bundle, bytes_index: u32) ?[]const u8 {
+    const cert_bytes = bundle.bytes.items;
+    if (bytes_index >= cert_bytes.len) return null;
+    const certificate = Certificate.der.Element.parse(cert_bytes, bytes_index) catch return null;
+    return cert_bytes[bytes_index..certificate.slice.end];
+}
+
 fn bundleContainsCertDer(bundle: Certificate.Bundle, bytes_index: u32, der: []const u8) bool {
     const cert_bytes = bundle.bytes.items;
     if (bytes_index >= cert_bytes.len) return false;
@@ -432,11 +446,19 @@ fn bundleContainsCertDer(bundle: Certificate.Bundle, bytes_index: u32, der: []co
     return mem.eql(u8, der, bundle_der);
 }
 
-fn findTrustedCertDer(bundle: Certificate.Bundle, der: []const u8) ?u32 {
-    var it = bundle.map.iterator();
+fn findTrustedCertDer(h: *const CertificateParser, der: []const u8) ?u32 {
+    if (h.prewarmed_trusted_index) |idx| {
+        if (der.len == h.cached_leaf_der_len and
+            std.hash.Wyhash.hash(0, der) == h.cached_leaf_hash and
+            bundleContainsCertDer(h.root_ca, idx, der))
+        {
+            return idx;
+        }
+    }
+    var it = h.root_ca.map.iterator();
     while (it.next()) |entry| {
         const bytes_index = entry.value_ptr.*;
-        if (bundleContainsCertDer(bundle, bytes_index, der)) return bytes_index;
+        if (bundleContainsCertDer(h.root_ca, bytes_index, der)) return bytes_index;
     }
     return null;
 }
@@ -495,6 +517,33 @@ pub const CertificateParser = struct {
     cached_leaf_ready: bool = false,
     cached_not_before: u64 = 0,
     cached_not_after: u64 = 0,
+    cached_leaf_der_len: u32 = 0,
+    prewarmed_trusted_index: ?u32 = null,
+
+    /// Parse and cache a single-cert root_ca bundle before the first handshake.
+    pub fn prewarmTrustedLeaf(h: *CertificateParser) !void {
+        if (h.skip_verify or h.cached_leaf_ready) return;
+        if (h.root_ca.map.count() != 1) return;
+        var it = h.root_ca.map.iterator();
+        const entry = it.next() orelse return;
+        const bytes_index = entry.value_ptr.*;
+        const der = bundleDerSpan(h.root_ca, bytes_index) orelse return;
+        const entry_cert: Certificate = .{ .buffer = h.root_ca.bytes.items, .index = bytes_index };
+        const subject = try entry_cert.parse();
+        if (h.host.len > 0) {
+            try subject.verifyHostName(h.host);
+            h.cached_host_ok = true;
+        }
+        h.pub_key = try dupe(&h.pub_key_buf, subject.pubKey());
+        h.pub_key_algo = subject.pub_key_algo;
+        try h.cacheParsedPublicKey();
+        h.cached_leaf_hash = std.hash.Wyhash.hash(0, der);
+        h.cached_leaf_der_len = @intCast(der.len);
+        h.cached_not_before = subject.validity.not_before;
+        h.cached_not_after = subject.validity.not_after;
+        h.prewarmed_trusted_index = bytes_index;
+        h.cached_leaf_ready = true;
+    }
 
     pub fn skipCertificate(d: *record.Decoder, tls_version: proto.Version) !void {
         if (tls_version == .tls_1_3) {
@@ -531,16 +580,15 @@ pub const CertificateParser = struct {
             if (trust_chain_established)
                 continue;
 
-            const trusted_index = if (!h.skip_verify) findTrustedCertDer(h.root_ca, crt) else null;
+            const trusted_index = if (!h.skip_verify) findTrustedCertDer(h, crt) else null;
             const leaf_hash = std.hash.Wyhash.hash(0, crt);
-            const reuse_leaf = h.cached_leaf_ready and leaf_hash == h.cached_leaf_hash;
+            const reuse_leaf = h.cached_leaf_ready and
+                crt.len == h.cached_leaf_der_len and
+                leaf_hash == h.cached_leaf_hash;
 
             if (last_cert == null and reuse_leaf and trusted_index != null) {
                 if (!h.skip_verify) {
-                    if (h.now_sec != 0 and h.now_sec < h.cached_not_before)
-                        return error.CertificateNotYetValid;
-                    if (h.now_sec != 0 and h.now_sec > h.cached_not_after)
-                        return error.CertificateExpired;
+                    try checkCertValidityCached(h);
                     trust_chain_established = true;
                 }
                 continue;
@@ -569,8 +617,10 @@ pub const CertificateParser = struct {
                     h.pub_key_algo = subject.pub_key_algo;
                     try h.cacheParsedPublicKey();
                     h.cached_leaf_hash = leaf_hash;
+                    h.cached_leaf_der_len = @intCast(crt.len);
                     h.cached_not_before = subject.validity.not_before;
                     h.cached_not_after = subject.validity.not_after;
+                    if (trusted_index) |idx| h.prewarmed_trusted_index = idx;
                     h.cached_leaf_ready = true;
                 }
                 last_cert = subject;

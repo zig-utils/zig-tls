@@ -23,13 +23,13 @@ cmake --build /tmp/boringssl/build -j
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Handshake TLS 1.3 (minimal ECDHE) | **~7800 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6045 /s** | ~6090 /s | **~0.99×** |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~2860 /s** | — | — |
-| Transfer send AES-128-GCM (16 KiB) | **~8080 MB/s** | ~6770 MB/s | **~1.19×** |
-| Transfer recv AES-128-GCM (16 KiB) | **~7630 MB/s** | ~7540 MB/s | **~1.01×** |
-| Transfer send AES-256-GCM (16 KiB) | **~7400 MB/s** | ~7050 MB/s | **~1.05×** |
-| Transfer recv AES-256-GCM (16 KiB) | **~7190 MB/s** | ~5850 MB/s | **~1.23×** |
+| Handshake TLS 1.3 (minimal ECDHE) | **~7540 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6155 /s** | ~6410 /s | **~0.96×** |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~2950 /s** | — | — |
+| Transfer send AES-128-GCM (16 KiB) | **~8490 MB/s** | ~8360 MB/s | **~1.02×** |
+| Transfer recv AES-128-GCM (16 KiB) | **~8050 MB/s** | ~8160 MB/s | ~0.99× |
+| Transfer send AES-256-GCM (16 KiB) | **~7750 MB/s** | ~7680 MB/s | **~1.01×** |
+| Transfer recv AES-256-GCM (16 KiB) | **~7480 MB/s** | ~7530 MB/s | ~0.99× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
@@ -85,6 +85,8 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   public keys and hostname verification across repeated handshakes with the same server.
 - **Trusted leaf skip-parse:** on reset, when the server sends the same trusted-anchor
   cert, skip DER parsing and chain verification entirely.
+- **Trusted leaf prewarm:** single-cert `root_ca` bundles are parsed once at client
+  init (pubkey, hostname, validity) so the first handshake skips TLS cert DER work too.
 - **Bedrock coord add/sub** (`p256_coord.zig`): foundation for future nistz point-add
   (OpenSSL/BoringSSL nistz formulas need coord add/sub, not fiat Montgomery add/sub).
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when

@@ -121,6 +121,21 @@ pub fn addMixedAffine(out: *[3]Coord, p: [3]Coord, q: [2]Coord) bool {
 
 const std = @import("std");
 
+test "hw mul matches fiat mul" {
+    if (!hw.enabled) return error.SkipZigTest;
+
+    var one: fiat.MontgomeryDomainFieldElement = undefined;
+    fiat.setOne(&one);
+    var two_fiat: fiat.MontgomeryDomainFieldElement = undefined;
+    fiat.add(&two_fiat, one, one);
+
+    var hw_out: Coord = undefined;
+    var fiat_out: Coord = undefined;
+    hw.mul(&hw_out, one, two_fiat);
+    fiat.mul(&fiat_out, one, two_fiat);
+    try std.testing.expectEqual(fiat_out, hw_out);
+}
+
 test "bedrock coord sub matches fiat Montgomery sub" {
     var one: fiat.MontgomeryDomainFieldElement = undefined;
     fiat.setOne(&one);
