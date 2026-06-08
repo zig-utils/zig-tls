@@ -110,9 +110,13 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   avoids CT field invert on the result x-coordinate.
 - **TLS 1.3 GCM nonce cache:** `CachedAesGcm` reuses the counter=1 tag mask and counter=2
   CTR ivec per record nonce (bench transfer path uses a fixed nonce).
-- **Bedrock coord add/sub** (`p256_coord.zig`): `addMixedAffine` uses Jacobian math and is
-  **not** equivalent to projective Algorithm 5 `addMixed` on this stack; `addMixedVarTime` is
-  retained for a future full Jacobian point port. `mulBase` stays on Algorithm 5 `addMixed`.
+- **Bedrock Jacobian mulBase (optional):** `mulBaseJacobian` accumulates in Jacobian coords
+  with `addMixedAffine` + `doubleJacobian` and converts via `field_inv_sqr_chain` (BoringSSL
+  z⁻² chain). Equivalence-tested against projective `mulBase`; **disabled by default**
+  (`use_bedrock_mul_base = false`) because Zig Bedrock coord add is still slower than
+  projective Algorithm 5 `addMixed` on Apple Silicon. Enable when point-add asm is vendored.
+- **Bedrock coord add/sub** (`p256_coord.zig`): Jacobian `addMixedAffine` / `doubleJacobian`
+  are **not** interchangeable with projective `P256.add` / `addMixed` (different Z semantics).
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.
 - **nistz base-point table:** Gueron–Krasnov 37×64 affine precompute (`p256/nistz_table.zig`)
