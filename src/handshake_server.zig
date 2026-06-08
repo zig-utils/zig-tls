@@ -310,12 +310,16 @@ pub const Handshake = struct {
         manager.resume_session_cb = tickets.resume_session_cb;
         manager.callback_ctx = tickets.callback_ctx;
 
-        @memcpy(&h.resumption_master_secret, h.transcript.resumptionSecret());
+        const resumption_secret = h.transcript.resumptionSecret();
+        @memset(&h.resumption_master_secret, 0);
+        @memcpy(h.resumption_master_secret[0..resumption_secret.len], resumption_secret);
+        var master_secret: [48]u8 = @splat(0);
+        @memcpy(master_secret[0..resumption_secret.len], resumption_secret);
         const state: session_ticket.SessionState = .{
             .tls_version = h.tls_version,
             .cipher_suite = h.cipher_suite,
             .named_group = h.named_group,
-            .master_secret = h.resumption_master_secret,
+            .master_secret = master_secret,
             .session_timeout_secs = tickets.session_timeout_secs,
         };
         return try manager.issueTicket(allocator, state);
@@ -920,6 +924,13 @@ pub const Handshake = struct {
             try w.int(u16, key_len);
             try w.slice(h.server_pub_key);
         }
+        if (h.psk_resumed) {
+            if (h.selected_psk_identity) |idx| {
+                try w.enumValue(proto.Extension.pre_shared_key);
+                try w.int(u16, 2);
+                try w.int(u16, idx);
+            }
+        }
         var ew = w.writerAt(ext_len_pos);
         try ew.int(u16, w.pos() - ext_len_pos - 2);
         var hw = w.writerAt(header_pos);
@@ -1118,10 +1129,12 @@ pub const Handshake = struct {
                                 mgr.callback_ctx = tickets.callback_ctx;
                                 if (mgr.resumeTicket(identity)) |state| {
                                     if (state.tls_version == .tls_1_3 and identity.len >= 18) {
-                                        const nonce_len = identity[16];
-                                        if (nonce_len + 17 <= identity.len) {
-                                            const nonce = identity[17 .. 17 + nonce_len];
-                                            h.transcript.setPreSharedSecret(&state.master_secret, nonce);
+                                        if (state.psk_nonce_len > 0) {
+                                            h.transcript.use(state.cipher_suite.hash());
+                                            h.transcript.setPreSharedSecret(
+                                                &state.master_secret,
+                                                state.psk_nonce[0..state.psk_nonce_len],
+                                            );
                                             h.psk_resumed = true;
                                             h.resumed_cipher_suite = state.cipher_suite;
                                             h.selected_psk_identity = identity_idx;
@@ -1223,7 +1236,6 @@ pub const Handshake = struct {
 const testing = std.testing;
 const data13 = @import("testdata/tls13.zig");
 const testu = @import("testu.zig");
-
 test "read client hello" {
     var reader: Io.Reader = .fixed(&data13.client_hello);
     var h: Handshake = .{
@@ -1237,6 +1249,22 @@ test "read client hello" {
     try testing.expectEqual(.x25519, h.named_group);
     try testing.expectEqualSlices(u8, &data13.client_random, &h.client_random);
     try testing.expectEqualSlices(u8, &data13.client_public_key, h.client_pub_key);
+}
+
+test "make server hello includes pre_shared_key on resume" {
+    var h: Handshake = .{ .input = undefined, .output = undefined };
+    h.cipher_suite = .AES_128_GCM_SHA256;
+    h.named_group = .x25519;
+    h.server_pub_key = h.server_pub_key_buf[0..32];
+    h.psk_resumed = true;
+    h.selected_psk_identity = 0;
+
+    var buffer: [128]u8 = undefined;
+    var w: record.Writer = .init(&buffer);
+    const actual = try h.makeServerHello(&w);
+    try testing.expectEqual(101, actual.len);
+    const psk_ext = &[_]u8{ 0x00, 0x29, 0x00, 0x02, 0x00, 0x00 };
+    try testing.expect(std.mem.indexOf(u8, actual, psk_ext) != null);
 }
 
 test "make server hello" {

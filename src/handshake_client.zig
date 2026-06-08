@@ -400,15 +400,25 @@ pub const Handshake = struct {
     }
 
     fn clientFlight1(h: *Self, opt: Options) !void {
-        try h.makeClientHello(opt, null);
+        const resumption_ticket: ?ResumptionTicket =
+            if (opt.session_resumption) |r| r.popTicket() else null;
+        if (resumption_ticket) |ticket| {
+            h.transcript.use(opt.session_resumption.?.hash_tag);
+            h.transcript.setPreSharedSecret(ticket.secret, ticket.nonce);
+        }
+        try h.makeClientHello(opt, resumption_ticket);
+        h.max_client_record_len = h.output.end;
+        if (resumption_ticket != null and opt.early_data != null and opt.early_data.?.len > 0)
+            try h.sendEarlyData(opt, true);
     }
 
     fn serverFlight1(h: *Self, opt: Options) !void {
         try h.readServerFlight1();
+        if (h.pre_shared_selected_identity == null) h.transcript.clearPreSharedSecret();
         h.transcript.use(h.cipher_suite.hash());
         if (h.tls_version == .tls_1_3) {
             try h.generateHandshakeCipher(opt.key_log_callback);
-            try h.readEncryptedServerFlight1(false);
+            try h.readEncryptedServerFlight1(h.pre_shared_selected_identity != null);
         }
     }
 
@@ -637,7 +647,6 @@ pub const Handshake = struct {
             }
             return;
         };
-        h.transcript.use(cs.hash());
         const early = h.transcript.earlyTrafficSecret(.client);
         const secret: Transcript.Secret = .{ .client = early, .server = early };
         var early_cipher = try Cipher.initTls13(cs, secret, .client);
@@ -1555,6 +1564,72 @@ test "nonblock handshake" {
     try testing.expectEqual(0, res.recv_pos);
     try testing.expectEqual(0, res.send_pos);
     try testing.expect(h.done());
+}
+
+test "psk resumption verifies client hello binder" {
+    const ServerNonBlock = @import("handshake_server.zig").NonBlock;
+    const ServerOptions = @import("handshake_server.zig").Options;
+    const session_ticket = @import("session_ticket.zig");
+
+    const allocator = testing.allocator;
+    const keys = session_ticket.TicketKeys.random();
+    var master_secret: [48]u8 = @splat(0xAB);
+    const state: session_ticket.SessionState = .{
+        .tls_version = .tls_1_3,
+        .cipher_suite = .AES_128_GCM_SHA256,
+        .named_group = .x25519,
+        .master_secret = master_secret,
+        .session_timeout_secs = 3600,
+    };
+    var mgr = session_ticket.Manager.init(keys);
+    const issued = try mgr.issueTicket(allocator, state);
+    defer allocator.free(issued.identity);
+
+    var resumption = Options.SessionResumption.init(allocator);
+    defer resumption.deinit();
+    const secret_idx = try resumption.appendSecret(.sha256, master_secret[0..32]);
+    var ticket_buf: [4096]u8 = undefined;
+    const ticket_msg = try session_ticket.makeNewSessionTicket(
+        &ticket_buf,
+        issued.lifetime,
+        issued.age_add,
+        issued.nonce,
+        issued.identity,
+    );
+    try resumption.pushTicket(ticket_msg, secret_idx);
+
+    const groups = &[_]proto.NamedGroup{.x25519};
+    const ciphers = &[_]CipherSuite{.AES_128_GCM_SHA256};
+    const client_opt = Options{
+        .host = "localhost",
+        .root_ca = .empty,
+        .insecure_skip_verify = true,
+        .cipher_suites = ciphers,
+        .named_groups = groups,
+        .session_resumption = &resumption,
+        .early_data = "early-bytes",
+    };
+    const server_opt = ServerOptions{
+        .auth = null,
+        .cipher_suites = ciphers,
+        .named_groups = groups,
+        .session_tickets = .{ .keys = keys },
+        .send_hello_retry_for_preferred_group = false,
+    };
+
+    var out_buf: [8192]u8 = undefined;
+    var out_writer: Io.Writer = .fixed(&out_buf);
+    var client: Handshake = .{ .input = undefined, .output = &out_writer };
+    try client.initKeys(client_opt);
+    const ticket = resumption.tickets.items[0];
+    client.transcript.use(.sha256);
+    client.transcript.setPreSharedSecret(ticket.secret, ticket.nonce);
+    try client.makeClientHello(client_opt, ticket);
+
+    var sc_buf: [max_ciphertext_record_len]u8 = undefined;
+    var server = ServerNonBlock.init(server_opt);
+    _ = try server.run(out_writer.buffered(), &sc_buf);
+    try testing.expect(server.inner.psk_resumed);
 }
 
 test "note about sizes" {
