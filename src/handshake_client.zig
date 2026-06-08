@@ -18,6 +18,7 @@ const Cipher = @import("cipher.zig").Cipher;
 const CipherSuite = @import("cipher.zig").CipherSuite;
 const cipher_suites = @import("cipher.zig").cipher_suites;
 const max_cleartext_len = @import("cipher.zig").max_cleartext_len;
+const max_ciphertext_record_len = @import("cipher.zig").max_ciphertext_record_len;
 
 const Transcript = @import("transcript.zig").Transcript;
 const record = @import("record.zig");
@@ -34,6 +35,7 @@ const DhKeyPair = common.DhKeyPair;
 const CertKeyPair = common.CertKeyPair;
 const cert = common.cert;
 
+const alpn = @import("alpn.zig");
 const log = std.log.scoped(.tls);
 
 pub const Options = struct {
@@ -76,6 +78,16 @@ pub const Options = struct {
 
     session_resumption: ?*SessionResumption = null,
 
+    /// ALPN protocols to offer in ClientHello.
+    alpn_protocols: []const alpn.Protocol = &.{},
+
+    /// Minimum/maximum TLS protocol version.
+    min_version: proto.Version = .tls_1_2,
+    max_version: proto.Version = .tls_1_3,
+
+    /// Request OCSP stapling (Node `requestOCSP`).
+    request_ocsp: bool = false,
+
     pub const Diagnostic = struct {
         tls_version: proto.Version = @enumFromInt(0),
         cipher_suite_tag: CipherSuite = @enumFromInt(0),
@@ -83,6 +95,7 @@ pub const Options = struct {
         signature_scheme: proto.SignatureScheme = @enumFromInt(0),
         client_signature_scheme: proto.SignatureScheme = @enumFromInt(0),
         is_session_resumption: bool = false,
+        alpn_protocol: ?alpn.Protocol = null,
         max_server_record_len: usize = 0,
         max_server_cleartext_len: usize = 0,
         max_client_record_len: usize = 0,
@@ -235,6 +248,8 @@ pub const Handshake = struct {
     max_server_record_len: usize = 0,
     max_server_cleartext_len: usize = 0,
     max_client_record_len: usize = 0,
+    selected_alpn: ?alpn.Protocol = null,
+    decrypt_buf: [max_ciphertext_record_len]u8 = undefined,
 
     const Self = @This();
 
@@ -466,6 +481,14 @@ pub const Handshake = struct {
         try w.extension(.supported_groups, opt.named_groups);
         try w.keyShare(opt.named_groups, shared_keys);
         try w.serverName(opt.host);
+        if (opt.alpn_protocols.len > 0) try alpn.writeExtension(&w, opt.alpn_protocols);
+        if (opt.request_ocsp) {
+            try w.enumValue(proto.Extension.status_request);
+            try w.int(u16, 5);
+            try w.int(u8, 1); // OCSP
+            try w.int(u16, 0); // empty responder_id_list
+            try w.int(u16, 0); // empty request_extensions
+        }
         // binder key placeholder
         const binder_pos: ?usize = if (resumption_ticket) |ticket| brk: {
             // Add pre shared key extension if this is session resumption. Must be last extension.
@@ -680,7 +703,7 @@ pub const Handshake = struct {
                         }
                         switch (handshake_type) {
                             .encrypted_extensions => {
-                                try d.skip(length);
+                                try h.parseEncryptedExtensions(&d, length);
                                 handshake_states = if (is_session_resumption)
                                     &.{ .certificate_request, .certificate, .finished }
                                 else if (h.cert.skip_verify)
@@ -870,7 +893,9 @@ pub const Handshake = struct {
         {
             const rec = try Record.read(h.input);
             h.max_server_record_len = @max(h.max_server_record_len, rec.buffer.len);
-            const content_type, const server_finished = try h.cipher.decrypt(@constCast(rec.buffer), rec);
+            @memcpy(h.decrypt_buf[0..rec.buffer.len], rec.buffer);
+            const local_rec = Record.init(h.decrypt_buf[0..rec.buffer.len]);
+            const content_type, const server_finished = try h.cipher.decrypt(h.decrypt_buf[0..rec.buffer.len], local_rec);
             if (content_type != .handshake)
                 return error.TlsUnexpectedMessage;
             const expected = record.handshakeHeader(.finished, 12) ++ h.transcript.serverFinishedTls12(&h.master_secret);
@@ -886,6 +911,27 @@ pub const Handshake = struct {
     }
 
     // Copy handshake parameters to opt.diagnostic
+    fn parseEncryptedExtensions(h: *Self, d: *record.Decoder, length: u24) !void {
+        const body = try d.slice(length);
+        if (body.len < 2) return;
+        const ex_list_len = mem.readInt(u16, body[0..2], .big);
+        var idx: usize = 2;
+        const ex_end = 2 + ex_list_len;
+        while (idx + 4 <= ex_end and idx < body.len) {
+            const ext_type: proto.Extension = @enumFromInt(mem.readInt(u16, body[idx..][0..2], .big));
+            const ext_len = mem.readInt(u16, body[idx + 2 ..][0..2], .big);
+            idx += 4;
+            if (idx + ext_len > body.len) return error.TlsDecodeError;
+            if (ext_type == .application_layer_protocol_negotiation and ext_len > 1) {
+                const plen = body[idx];
+                if (plen + 1 == ext_len) {
+                    h.selected_alpn = body[idx + 1 .. idx + 1 + plen];
+                }
+            }
+            idx += ext_len;
+        }
+    }
+
     fn updateDiagnostic(h: *Self, opt: Options, is_session_resumption: bool) void {
         if (opt.diagnostic) |d| {
             d.tls_version = h.tls_version;
@@ -893,6 +939,7 @@ pub const Handshake = struct {
             d.named_group = h.named_group orelse @as(proto.NamedGroup, @enumFromInt(0x0000));
             d.signature_scheme = h.cert.signature_scheme;
             d.is_session_resumption = is_session_resumption;
+            d.alpn_protocol = h.selected_alpn;
             d.max_server_record_len = h.max_server_record_len;
             d.max_server_cleartext_len = h.max_server_cleartext_len;
             d.max_client_record_len = h.max_client_record_len;
@@ -968,10 +1015,6 @@ test "verify google.com certificate" {
         .input = &reader,
         .client_random = @embedFile("testdata/google.com/client_random").*,
     };
-
-    var ca_bundle: Certificate.Bundle = .empty;
-    try ca_bundle.rescan(testing.allocator);
-    defer ca_bundle.deinit(testing.allocator);
 
     h.cert = .{ .host = "google.com", .skip_verify = true, .root_ca = .empty, .now_sec = 1714846451 };
     try h.readServerFlight1();
@@ -1309,6 +1352,11 @@ pub const NonBlock = struct {
     /// Cipher produced in handshake, null until successful handshake.
     pub fn cipher(self: Self) ?Cipher {
         return if (self.done()) self.inner.cipher else null;
+    }
+
+    /// Negotiated ALPN protocol, available after handshake completes.
+    pub fn selectedAlpn(self: Self) ?alpn.Protocol {
+        return if (self.done()) self.inner.selected_alpn else null;
     }
 };
 
