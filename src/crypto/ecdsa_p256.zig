@@ -6,7 +6,45 @@ pub const P256 = @import("p256.zig").P256;
 pub const EcdsaP256Sha256 = crypto.sign.ecdsa.Ecdsa(P256, crypto.hash.sha2.Sha256);
 
 const EncodingError = crypto.errors.EncodingError;
+const IdentityElementError = crypto.errors.IdentityElementError;
+const NonCanonicalError = crypto.errors.NonCanonicalError;
+const SignatureVerificationError = crypto.errors.SignatureVerificationError;
 const Signature = EcdsaP256Sha256.Signature;
+const PublicKey = EcdsaP256Sha256.PublicKey;
+const scalar = P256.scalar;
+
+fn hashToScalar(msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8) scalar.Scalar {
+    var xs: [48]u8 = @splat(0);
+    @memcpy(xs[48 - msg_hash.len ..], msg_hash[0..]);
+    return scalar.Scalar.fromBytes48(xs, .big);
+}
+
+fn feBytesToScalar(x_bytes: [P256.Fe.encoded_length]u8) scalar.Scalar {
+    var xs: [48]u8 = @splat(0);
+    @memcpy(xs[48 - x_bytes.len ..], x_bytes[0..]);
+    return scalar.Scalar.fromBytes48(xs, .big);
+}
+
+/// Verify a prehashed message using Shamir double-base mul (u1*G + u2*Q).
+pub fn verifyPrehashed(
+    sig: Signature,
+    msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8,
+    public_key: PublicKey,
+) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
+    const r = try scalar.Scalar.fromBytes(sig.r, .big);
+    const s = try scalar.Scalar.fromBytes(sig.s, .big);
+    if (r.isZero() or s.isZero()) return error.IdentityElement;
+
+    const z = hashToScalar(msg_hash);
+    if (z.isZero()) return error.SignatureVerificationFailed;
+
+    const s_inv = s.invert();
+    const v1 = z.mul(s_inv).toBytes(.little);
+    const v2 = r.mul(s_inv).toBytes(.little);
+    const sum = try P256.mulDoubleBasePublic(P256.basePoint, v1, public_key.p, v2, .little);
+    const vr = feBytesToScalar(sum.affineCoordinates().x.toBytes(.big));
+    if (!r.equivalent(vr)) return error.SignatureVerificationFailed;
+}
 
 fn parseTlsDerP256(der: []const u8, sig: *Signature) bool {
     if (der.len < 8 or der[0] != 0x30) return false;
@@ -52,6 +90,18 @@ test "signatureFromDerTls matches fromDer" {
     const fast = try signatureFromDerTls(der);
     try std.testing.expectEqualSlices(u8, &sig.r, &fast.r);
     try std.testing.expectEqualSlices(u8, &sig.s, &fast.s);
+}
+
+test "verifyPrehashed matches std verifyPrehashed" {
+    var seed: [EcdsaP256Sha256.KeyPair.seed_length]u8 = undefined;
+    @memset(&seed, 0x42);
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const msg = "TLS 1.3, server CertificateVerify";
+    const sig = try kp.sign(msg, null);
+    var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    crypto.hash.sha2.Sha256.hash(msg, &digest, .{});
+    try verifyPrehashed(sig, digest, kp.public_key);
+    try sig.verifyPrehashed(digest, kp.public_key);
 }
 
 test "hw P-256 ECDSA sign and verify roundtrip" {

@@ -24,8 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~7540 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6500 /s** | ~6830 /s | **~0.95×** |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3100 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6610 /s** | ~6570 /s | **~1.01×** |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3800 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8490 MB/s** | ~8360 MB/s | **~1.02×** |
 | Transfer recv AES-128-GCM (16 KiB) | **~8050 MB/s** | ~8160 MB/s | ~0.99× |
 | Transfer send AES-256-GCM (16 KiB) | **~7750 MB/s** | ~7680 MB/s | **~1.01×** |

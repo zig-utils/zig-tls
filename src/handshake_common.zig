@@ -724,7 +724,7 @@ pub const CertificateParser = struct {
                     .server => transcript.serverCertificateVerifyDigest(&digest),
                     .client => transcript.clientCertificateVerifyDigest(&digest),
                 }
-                try sig.verifyPrehashed(digest, key);
+                try ecdsa_p256.verifyPrehashed(sig, digest, key);
             },
             .ecdsa_secp384r1_sha384 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
@@ -757,7 +757,7 @@ pub const CertificateParser = struct {
                 const sig = try ecdsa_p256.signatureFromDerTls(h.signature);
                 var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
                 crypto.hash.sha2.Sha256.hash(verify_bytes, &digest, .{});
-                try sig.verifyPrehashed(digest, key);
+                try ecdsa_p256.verifyPrehashed(sig, digest, key);
             },
             .ecdsa_secp384r1_sha384 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
