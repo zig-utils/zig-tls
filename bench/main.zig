@@ -57,11 +57,11 @@ fn pumpHandshake(cli: *tls.nonblock.Client, srv: *tls.nonblock.Server) !void {
     var cs_buf: [tls.max_ciphertext_record_len]u8 = undefined;
     var sc_buf: [tls.max_ciphertext_record_len]u8 = undefined;
 
-    _ = try cli.run(&.{}, &cs_buf);
-    _ = try srv.run(cs_buf[0..], &sc_buf);
+    var cr = try cli.run(&.{}, &cs_buf);
+    var sr = try srv.run(cr.send, &sc_buf);
     while (!cli.done()) {
-        _ = try cli.run(sc_buf[0..], &cs_buf);
-        _ = try srv.run(cs_buf[0..], &sc_buf);
+        cr = try cli.run(sr.send, &cs_buf);
+        sr = try srv.run(cr.send, &sc_buf);
     }
 }
 

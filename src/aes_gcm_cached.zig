@@ -84,7 +84,7 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             mac.update(c[0..m.len]);
             mac.pad();
 
-            var final_block = ctx.h;
+            var final_block: [16]u8 = undefined;
             mem.writeInt(u64, final_block[0..8], 40, .big);
             mem.writeInt(u64, final_block[8..16], @as(u64, m.len) * 8, .big);
             mac.update(&final_block);
@@ -152,7 +152,7 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             mac.update(c);
             mac.pad();
 
-            var final_block = ctx.h;
+            var final_block: [16]u8 = undefined;
             mem.writeInt(u64, final_block[0..8], 40, .big);
             mem.writeInt(u64, final_block[8..16], @as(u64, m.len) * 8, .big);
             mac.update(&final_block);

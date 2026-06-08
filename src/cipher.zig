@@ -509,6 +509,8 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
         decrypt_key: [key_len]u8,
         encrypt_iv: [nonce_len]u8,
         decrypt_iv: [nonce_len]u8,
+        encrypt_npub: [nonce_len]u8 = undefined,
+        decrypt_npub: [nonce_len]u8 = undefined,
         encrypt_seq: u64 = 0,
         decrypt_seq: u64 = 0,
         gcm_enc: if (has_cached_gcm) GcmCtx else void = undefined,
@@ -529,6 +531,31 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             return self;
         }
 
+        fn resetNpubs(self: *Self) void {
+            self.encrypt_npub = self.encrypt_iv;
+            self.decrypt_npub = self.decrypt_iv;
+        }
+
+        fn npubSeqDelta(seq: u64) u64 {
+            var s_buf: [8]u8 = undefined;
+            var s1_buf: [8]u8 = undefined;
+            mem.writeInt(u64, &s_buf, seq, .big);
+            mem.writeInt(u64, &s1_buf, seq +% 1, .big);
+            return mem.readInt(u64, &s_buf, .big) ^ mem.readInt(u64, &s1_buf, .big);
+        }
+
+        fn bumpEncryptNpub(self: *Self) void {
+            const delta = npubSeqDelta(self.encrypt_seq);
+            const x = mem.readInt(u64, self.encrypt_npub[nonce_len - 8 ..][0..8], .big);
+            mem.writeInt(u64, self.encrypt_npub[nonce_len - 8 ..][0..8], x ^ delta, .big);
+        }
+
+        fn bumpDecryptNpub(self: *Self) void {
+            const delta = npubSeqDelta(self.decrypt_seq);
+            const x = mem.readInt(u64, self.decrypt_npub[nonce_len - 8 ..][0..8], .big);
+            mem.writeInt(u64, self.decrypt_npub[nonce_len - 8 ..][0..8], x ^ delta, .big);
+        }
+
         fn keyGenerate(self: *Self) void {
             self.encrypt_key = hkdfExpandLabel(Hkdf, self.encrypt_secret, "key", "", key_len);
             self.decrypt_key = hkdfExpandLabel(Hkdf, self.decrypt_secret, "key", "", key_len);
@@ -542,6 +569,7 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
                 self.gcm_enc = GcmCtx.fromKey(self.encrypt_key);
                 self.gcm_dec = GcmCtx.fromKey(self.decrypt_key);
             }
+            self.resetNpubs();
         }
 
         pub fn keyUpdateEncrypt(self: *Self) void {
@@ -584,9 +612,10 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const ciphertext = buf[record.header_len..][0 .. cleartext.len + 1];
             const auth_tag = buf[record.header_len + ciphertext.len ..][0..auth_tag_len];
 
-            const iv = ivWithSeq(nonce_len, self.encrypt_iv, self.encrypt_seq);
+            const iv = if (comptime has_cached_gcm) self.encrypt_npub else ivWithSeq(nonce_len, self.encrypt_iv, self.encrypt_seq);
             if (comptime has_cached_gcm) {
                 self.gcm_enc.encrypt(ciphertext, auth_tag, ciphertext, header, iv);
+                self.bumpEncryptNpub();
             } else {
                 AeadType.encrypt(ciphertext, auth_tag, ciphertext, header, iv, self.encrypt_key);
             }
@@ -614,9 +643,10 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const ciphertext = buf[record.header_len..][0 .. cleartext_len + 1];
             const auth_tag = buf[record.header_len + ciphertext.len ..][0..auth_tag_len];
             const ad: *const [record.header_len]u8 = buf[0..record.header_len];
-            const iv = ivWithSeq(nonce_len, self.encrypt_iv, self.encrypt_seq);
+            const iv = if (comptime has_cached_gcm) self.encrypt_npub else ivWithSeq(nonce_len, self.encrypt_iv, self.encrypt_seq);
             if (comptime has_cached_gcm) {
                 self.gcm_enc.encryptTls13(ciphertext, auth_tag, ciphertext, ad, iv);
+                self.bumpEncryptNpub();
             } else {
                 AeadType.encrypt(ciphertext, auth_tag, ciphertext, ad, iv, self.encrypt_key);
             }
@@ -645,9 +675,10 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const ciphertext = rec.payload[0..ciphertext_len];
             const auth_tag = rec.payload[ciphertext_len..][0..auth_tag_len];
 
-            const iv = ivWithSeq(nonce_len, self.decrypt_iv, self.decrypt_seq);
+            const iv = if (comptime has_cached_gcm) self.decrypt_npub else ivWithSeq(nonce_len, self.decrypt_iv, self.decrypt_seq);
             if (comptime has_cached_gcm) {
                 self.gcm_dec.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv) catch return error.TlsBadRecordMac;
+                self.bumpDecryptNpub();
             } else {
                 AeadType.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
             }
@@ -670,9 +701,10 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const ciphertext = payload[0..ciphertext_len];
             const auth_tag = payload[ciphertext_len..][0..auth_tag_len];
             const ad: *const [record.header_len]u8 = record_buf[0..record.header_len];
-            const iv = ivWithSeq(nonce_len, self.decrypt_iv, self.decrypt_seq);
+            const iv = if (comptime has_cached_gcm) self.decrypt_npub else ivWithSeq(nonce_len, self.decrypt_iv, self.decrypt_seq);
             if (comptime has_cached_gcm) {
                 self.gcm_dec.decryptTls13(ciphertext, ciphertext, auth_tag.*, ad, iv) catch return error.TlsBadRecordMac;
+                self.bumpDecryptNpub();
             } else {
                 AeadType.decrypt(ciphertext, ciphertext, auth_tag.*, ad, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
             }
