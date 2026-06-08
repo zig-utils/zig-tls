@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addHwGcmAsm(b, tls_module, target);
 
     // Unit tests
     const lib_mod = b.createModule(.{
@@ -17,6 +18,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addHwGcmAsm(b, lib_mod, target);
     const unit_tests = b.addTest(.{
         .root_module = lib_mod,
     });
@@ -72,5 +74,36 @@ pub fn build(b: *std.Build) void {
         const fuzz_step = b.step("fuzz", "Build fuzz targets");
         fuzz_step.dependOn(&b.addInstallArtifact(record_fuzz, .{}).step);
         fuzz_step.dependOn(&b.addInstallArtifact(handshake_fuzz, .{}).step);
+    }
+}
+
+fn addHwGcmAsm(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    const arch = target.result.cpu.arch;
+    const os = target.result.os.tag;
+
+    if (arch == .aarch64 and (os == .macos or os == .linux)) {
+        const suffix = if (os == .macos) "apple" else "linux";
+        module.addIncludePath(b.path("src/crypto/aarch64/include"));
+        inline for (.{
+            "aesv8-gcm-armv8",
+            "ghashv8-armv8",
+            "aesv8-armv8",
+        }) |base| {
+            const path = b.fmt("src/crypto/aarch64/{s}-{s}.S", .{ base, suffix });
+            module.addAssemblyFile(b.path(path));
+        }
+        return;
+    }
+
+    if (arch == .x86_64 and (os == .macos or os == .linux)) {
+        const suffix = if (os == .macos) "apple" else "linux";
+        module.addIncludePath(b.path("src/crypto/x86_64/include"));
+        inline for (.{
+            "aes-gcm-avx2-x86_64",
+            "aesni-x86_64",
+        }) |base| {
+            const path = b.fmt("src/crypto/x86_64/{s}-{s}.S", .{ base, suffix });
+            module.addAssemblyFile(b.path(path));
+        }
     }
 }

@@ -5,10 +5,12 @@ const mem = std.mem;
 const modes = crypto.core.modes;
 const Ghash = crypto.onetimeauth.Ghash;
 const AuthenticationError = crypto.errors.AuthenticationError;
+const hw_gcm = @import("crypto/hw_gcm.zig");
 
 pub fn CachedAesGcm(comptime Aes: type) type {
     const dummy_key: [Aes.key_bits / 8]u8 = undefined;
     const AesCtx = @TypeOf(Aes.initEnc(dummy_key));
+    const has_stitched_gcm = hw_gcm.enabled and (Aes.key_bits == 128 or Aes.key_bits == 256);
 
     return struct {
         pub const tag_length = 16;
@@ -17,6 +19,8 @@ pub fn CachedAesGcm(comptime Aes: type) type {
 
         aes: AesCtx,
         h: [16]u8,
+        hw_aes_key: if (has_stitched_gcm) hw_gcm.AesKey else void = undefined,
+        hw_htable: if (has_stitched_gcm) [16]hw_gcm.U128 else void = undefined,
         /// GHASH state after the padded 5-byte TLS 1.3 AD block (keyed by record payload length).
         tls13_mac_after_ad: Ghash = undefined,
         tls13_payload_len: u16 = 0xffff,
@@ -24,6 +28,10 @@ pub fn CachedAesGcm(comptime Aes: type) type {
         pub fn fromKey(key: [key_length]u8) @This() {
             var ctx: @This() = .{ .aes = Aes.initEnc(key), .h = undefined };
             ctx.aes.encrypt(&ctx.h, &@splat(0));
+            if (comptime has_stitched_gcm) {
+                ctx.hw_aes_key = hw_gcm.initAesKey(Aes.key_bits, &key);
+                hw_gcm.initHtable(&ctx.hw_htable, ctx.h);
+            }
             return ctx;
         }
 
@@ -104,6 +112,24 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             mem.writeInt(u32, j[nonce_length..][0..4], 1, .big);
             ctx.aes.encrypt(&t, &j);
 
+            if (comptime has_stitched_gcm) {
+                if (m.len >= hw_gcm.min_bulk_len) {
+                    var xi = hw_gcm.xiFromAcc(ctx.tls13_mac_after_ad.acc);
+                    var ivec = hw_gcm.ctrIvec(npub, 2);
+                    const bulk = hw_gcm.encryptBulk(&ctx.hw_aes_key, &ctx.hw_htable, c[0..m.len], m, &xi, &ivec);
+
+                    var mac = ctx.tls13_mac_after_ad;
+                    mac.acc = hw_gcm.accFromXi(&xi);
+                    if (bulk < m.len) {
+                        modes.ctr(@TypeOf(ctx.aes), ctx.aes, c[bulk..m.len], m[bulk..m.len], ivec, .big);
+                        mac.update(c[bulk..m.len]);
+                        mac.pad();
+                    }
+                    finishTls13Mac(&mac, m.len, tag, &t);
+                    return;
+                }
+            }
+
             mem.writeInt(u32, j[nonce_length..][0..4], 2, .big);
             modes.ctr(@TypeOf(ctx.aes), ctx.aes, c, m, j, .big);
 
@@ -168,6 +194,30 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             j[0..nonce_length].* = npub;
             mem.writeInt(u32, j[nonce_length..][0..4], 1, .big);
             ctx.aes.encrypt(&t, &j);
+
+            if (comptime has_stitched_gcm) {
+                if (m.len >= hw_gcm.min_bulk_len) {
+                    var xi = hw_gcm.xiFromAcc(ctx.tls13_mac_after_ad.acc);
+                    var ivec = hw_gcm.ctrIvec(npub, 2);
+                    const bulk = hw_gcm.decryptBulk(&ctx.hw_aes_key, &ctx.hw_htable, m[0..m.len], c, &xi, &ivec);
+                    var mac = ctx.tls13_mac_after_ad;
+                    mac.acc = hw_gcm.accFromXi(&xi);
+                    if (bulk < m.len) {
+                        mac.update(c[bulk..]);
+                        mac.pad();
+                        modes.ctr(@TypeOf(ctx.aes), ctx.aes, m[bulk..m.len], c[bulk..m.len], ivec, .big);
+                    }
+                    var computed_tag: [tag_length]u8 = undefined;
+                    finishTls13Mac(&mac, m.len, &computed_tag, &t);
+                    const verify = crypto.timing_safe.eql([tag_length]u8, computed_tag, tag);
+                    if (!verify) {
+                        crypto.secureZero(u8, &computed_tag);
+                        @memset(m, undefined);
+                        return error.AuthenticationFailed;
+                    }
+                    return;
+                }
+            }
 
             var mac = ctx.tls13_mac_after_ad;
             mac.update(c);
@@ -248,6 +298,49 @@ test "CachedAesGcm encryptTls13 matches generic" {
     ctx.encrypt(&c_gen, &tag_gen, m, &ad, npub);
     try testing.expectEqualSlices(u8, &c_tls, &c_gen);
     try testing.expectEqualSlices(u8, &tag_tls, &tag_gen);
+}
+
+test "CachedAesGcm AES-256 encryptTls13 bulk matches generic" {
+    const Cached = CachedAesGcm(crypto.core.aes.Aes256);
+    var key: [32]u8 = undefined;
+    @memset(&key, 0x88);
+    var ctx = Cached.fromKey(key);
+    var npub: [12]u8 = undefined;
+    @memset(&npub, 0xaa);
+    var ad: [5]u8 = .{ 0x17, 0x03, 0x03, 0x40, 0x11 };
+    var m: [16385]u8 = undefined;
+    @memset(&m, 0xcd);
+    var c_tls: [m.len]u8 = undefined;
+    var c_gen: [m.len]u8 = undefined;
+    var tag_tls: [16]u8 = undefined;
+    var tag_gen: [16]u8 = undefined;
+    ctx.encryptTls13(&c_tls, &tag_tls, &m, &ad, npub);
+    ctx.encrypt(&c_gen, &tag_gen, &m, &ad, npub);
+    try testing.expectEqualSlices(u8, &c_tls, &c_gen);
+    try testing.expectEqualSlices(u8, &tag_tls, &tag_gen);
+}
+
+test "CachedAesGcm encryptTls13 bulk matches generic" {
+    const Cached = CachedAesGcm(crypto.core.aes.Aes128);
+    var key: [16]u8 = undefined;
+    @memset(&key, 0x77);
+    var ctx = Cached.fromKey(key);
+    var npub: [12]u8 = undefined;
+    @memset(&npub, 0x99);
+    var ad: [5]u8 = .{ 0x17, 0x03, 0x03, 0x40, 0x11 };
+    var m: [16385]u8 = undefined;
+    @memset(&m, 0xab);
+    var c_tls: [m.len]u8 = undefined;
+    var c_gen: [m.len]u8 = undefined;
+    var tag_tls: [16]u8 = undefined;
+    var tag_gen: [16]u8 = undefined;
+    ctx.encryptTls13(&c_tls, &tag_tls, &m, &ad, npub);
+    ctx.encrypt(&c_gen, &tag_gen, &m, &ad, npub);
+    try testing.expectEqualSlices(u8, &c_tls, &c_gen);
+    try testing.expectEqualSlices(u8, &tag_tls, &tag_gen);
+    var out: [m.len]u8 = undefined;
+    try ctx.decryptTls13(&out, &c_tls, tag_tls, &ad, npub);
+    try testing.expectEqualSlices(u8, &m, &out);
 }
 
 test "CachedAesGcm roundtrip" {
