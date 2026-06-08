@@ -8,6 +8,7 @@ const Certificate = crypto.Certificate;
 
 const Cipher = @import("cipher.zig").Cipher;
 const CipherSuite = @import("cipher.zig").CipherSuite;
+const max_ciphertext_record_len = @import("cipher.zig").max_ciphertext_record_len;
 const cipher_suites = @import("cipher.zig").cipher_suites;
 const max_cleartext_len = @import("cipher.zig").max_cleartext_len;
 
@@ -166,8 +167,21 @@ pub const Handshake = struct {
     client_cookie_buf: [256]u8 = undefined,
     client_cookie: []const u8 = &.{},
     accept_early_data: bool = false,
+    psk_resumed: bool = false,
+    resumed_cipher_suite: CipherSuite = @enumFromInt(0),
+    selected_psk_identity: ?u16 = null,
+    psk_binder_pos: usize = 0,
+    psk_binder_end: usize = 0,
+    psk_offer_binder: [48]u8 = undefined,
+    psk_offer_binder_len: usize = 0,
+    early_data_buf: [16384]u8 = undefined,
+    early_data: []const u8 = &.{},
 
     const Self = @This();
+
+    pub fn earlyData(h: Self) []const u8 {
+        return h.early_data;
+    }
 
     fn needsHelloRetry(h: *Self, server_groups: []const proto.NamedGroup) bool {
         if (server_groups.len == 0) return false;
@@ -190,7 +204,7 @@ pub const Handshake = struct {
         h.initKeys(opt_in);
         var opt = opt_in;
 
-        h.readClientHello(opt.cipher_suites, opt.effectiveNamedGroups()) catch |err| {
+        h.readClientHello(opt, opt.effectiveNamedGroups()) catch |err| {
             try h.writeAlert(null, err);
             return err;
         };
@@ -205,7 +219,7 @@ pub const Handshake = struct {
             try h.sendHelloRetryRequest(opt);
             try h.output.flush();
             h.hello_retry_sent = true;
-            h.readClientHello(opt.cipher_suites, opt.effectiveNamedGroups()) catch |err| {
+            h.readClientHello(opt, opt.effectiveNamedGroups()) catch |err| {
                 try h.writeAlert(null, err);
                 return err;
             };
@@ -233,6 +247,7 @@ pub const Handshake = struct {
         h.transcript.use(h.cipher_suite.hash());
 
         if (h.tls_version == .tls_1_3) {
+            try h.readEarlyClientData(opt);
             // TLS 1.3 handshake
             h.serverFlight(opt) catch |err| {
                 try h.writeAlert(null, err);
@@ -307,8 +322,36 @@ pub const Handshake = struct {
     }
 
     fn clientFlight1(h: *Self, opt: Options) !void {
-        try h.readClientHello(opt.cipher_suites, opt.named_groups);
+        try h.readClientHello(opt, opt.named_groups);
         h.transcript.use(h.cipher_suite.hash());
+        if (h.tls_version == .tls_1_3) try h.readEarlyClientData(opt);
+    }
+
+    fn readEarlyClientData(h: *Self, opt: Options) !void {
+        if (!h.accept_early_data or !h.psk_resumed) return;
+        const early = h.transcript.earlyTrafficSecret(.client);
+        const secret: Transcript.Secret = .{ .client = early, .server = early };
+        var early_cipher = try Cipher.initTls13(h.cipher_suite, secret, .server);
+        var total: usize = 0;
+        const max_len = @min(opt.max_early_data_size, h.early_data_buf.len);
+        while (true) {
+            const rec = Record.read(h.input) catch |err| switch (err) {
+                error.EndOfStream, error.InputBufferUndersize => {
+                    if (total > 0) h.early_data = h.early_data_buf[0..total];
+                    return;
+                },
+                else => return err,
+            };
+            if (rec.content_type != .application_data) return error.TlsUnexpectedMessage;
+            if (total >= max_len) return error.TlsUnexpectedMessage;
+            var record_buf: [max_ciphertext_record_len]u8 = undefined;
+            if (rec.buffer.len > record_buf.len) return error.TlsRecordOverflow;
+            @memcpy(record_buf[0..rec.buffer.len], rec.buffer);
+            const cleartext = try Cipher.decryptRecordInPlace(&early_cipher, record_buf[0..rec.buffer.len]);
+            if (total + cleartext.len > max_len) return error.TlsUnexpectedMessage;
+            @memcpy(h.early_data_buf[total..][0..cleartext.len], cleartext);
+            total += cleartext.len;
+        }
     }
 
     /// TLS 1.2 server flight: ServerHello, Certificate, ServerKeyExchange, ServerHelloDone
@@ -897,12 +940,13 @@ pub const Handshake = struct {
         try hw.int(u16, ext_len); // extensions length
     }
 
-    fn readClientHello(h: *Self, supported_cipher_suites: []const CipherSuite, server_named_groups: []const proto.NamedGroup) !void {
+    fn readClientHello(h: *Self, opt: Options, server_named_groups: []const proto.NamedGroup) !void {
+        const supported_cipher_suites = opt.cipher_suites;
         log.info("readClientHello: starting to parse ClientHello", .{});
         var d = try Record.decoder(h.input);
         if (d.payload.len > max_cleartext_len) return error.TlsRecordOverflow;
         try d.expectContentType(.handshake);
-        h.transcript.update(d.payload);
+        var transcript_updated = false;
 
         const handshake_type = try d.decode(proto.Handshake);
         if (handshake_type != .client_hello) return error.TlsUnexpectedMessage;
@@ -1058,6 +1102,53 @@ pub const Handshake = struct {
                     if (extension_len != 0) return error.TlsIllegalParameter;
                     h.accept_early_data = true;
                 },
+                .pre_shared_key => {
+                    if (d.idx + extension_len != extensions_end_idx) return error.TlsIllegalParameter;
+                    const identities_len = try d.decode(u16);
+                    const identities_end = d.idx + identities_len;
+                    var identity_idx: u16 = 0;
+                    while (d.idx < identities_end) {
+                        const id_len = try d.decode(u16);
+                        const identity = try d.slice(id_len);
+                        _ = try d.decode(u32);
+                        if (!h.psk_resumed) {
+                            if (opt.session_tickets) |tickets| {
+                                var mgr = session_ticket.Manager.init(tickets.keys);
+                                mgr.resume_session_cb = tickets.resume_session_cb;
+                                mgr.callback_ctx = tickets.callback_ctx;
+                                if (mgr.resumeTicket(identity)) |state| {
+                                    if (state.tls_version == .tls_1_3 and identity.len >= 18) {
+                                        const nonce_len = identity[16];
+                                        if (nonce_len + 17 <= identity.len) {
+                                            const nonce = identity[17 .. 17 + nonce_len];
+                                            h.transcript.setPreSharedSecret(&state.master_secret, nonce);
+                                            h.psk_resumed = true;
+                                            h.resumed_cipher_suite = state.cipher_suite;
+                                            h.selected_psk_identity = identity_idx;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        identity_idx += 1;
+                    }
+                    h.psk_binder_pos = d.idx;
+                    const binders_list_len = try d.decode(u16);
+                    const binders_end = d.idx + binders_list_len;
+                    var binder_idx: u16 = 0;
+                    while (d.idx < binders_end) {
+                        const binder_len = try d.decode(u8);
+                        const binder = try d.slice(binder_len);
+                        if (h.selected_psk_identity) |selected| {
+                            if (binder_idx == selected) {
+                                h.psk_offer_binder_len = binder.len;
+                                @memcpy(h.psk_offer_binder[0..binder.len], binder);
+                            }
+                        }
+                        binder_idx += 1;
+                    }
+                    h.psk_binder_end = binders_end;
+                },
                 else => {
                     try d.skip(extension_len);
                 },
@@ -1105,6 +1196,26 @@ pub const Handshake = struct {
             // No compatible cipher suite found
             return error.TlsNoSupportedCiphers;
         }
+
+        if (h.psk_resumed) {
+            if (h.resumed_cipher_suite != h.cipher_suite) {
+                h.psk_resumed = false;
+                h.transcript.clearPreSharedSecret();
+                h.transcript.update(d.payload);
+                transcript_updated = true;
+            } else {
+                h.transcript.use(h.cipher_suite.hash());
+                h.transcript.update(d.payload[0..h.psk_binder_pos]);
+                const expected = h.transcript.pskBinder();
+                if (h.psk_offer_binder_len != expected.len or
+                    !mem.eql(u8, expected, h.psk_offer_binder[0..h.psk_offer_binder_len]))
+                    return error.TlsDecryptError;
+                h.transcript.update(d.payload[h.psk_binder_pos..h.psk_binder_end]);
+                transcript_updated = true;
+            }
+        }
+        if (!transcript_updated) h.transcript.update(d.payload);
+
         log.info("readClientHello complete: tls_version={}, cipher_suite={x}, named_group={x}", .{ h.tls_version, @intFromEnum(h.cipher_suite), @intFromEnum(h.named_group) });
     }
 };
@@ -1120,7 +1231,7 @@ test "read client hello" {
         .output = undefined,
     };
     h.signature_scheme = .ecdsa_secp521r1_sha512; // this must be supported in signature_algorithms extension
-    try h.readClientHello(cipher_suites.tls13, &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 });
+    try h.readClientHello(.{ .auth = null, .cipher_suites = cipher_suites.tls13 }, &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 });
 
     try testing.expectEqual(CipherSuite.AES_256_GCM_SHA384, h.cipher_suite);
     try testing.expectEqual(.x25519, h.named_group);
@@ -1311,5 +1422,10 @@ pub const NonBlock = struct {
     /// Negotiated ALPN protocol, available after handshake completes.
     pub fn selectedAlpn(self: Self) ?alpn.Protocol {
         return if (self.done()) self.inner.selected_alpn else null;
+    }
+
+    /// 0-RTT early data received from the client (empty if none).
+    pub fn earlyData(self: Self) []const u8 {
+        return self.inner.early_data;
     }
 };

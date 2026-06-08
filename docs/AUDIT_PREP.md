@@ -47,7 +47,7 @@ testssl.sh --quiet --color 0 localhost:8443
 
 - TLS 1.2 static RSA key exchange: server decrypt path implemented; legacy export ciphers still unsupported
 - HelloRetryRequest: implemented for preferred-group mismatch; stateless cookie is connection-scoped (16-byte random)
-- 0-RTT early data: client send + server `max_early_data` in EncryptedExtensions; server early-data record decryption is best-effort
+- 0-RTT early data: client send and server decrypt with PSK binder verification; `max_early_data` advertised in EncryptedExtensions
 - FFDHE2048: implemented (RFC 7919); x448 and secp521r1 negotiate but require future `std.crypto` curve support
 
 ## Bun Integration Surface

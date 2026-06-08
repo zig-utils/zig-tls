@@ -327,7 +327,7 @@ fn TranscriptT(comptime Hash: type) type {
             const early_secret = self.handshake_secret orelse Hkdf.extract(&[1]u8{0}, &zeroes);
             const hello_hash = self.hash.peek();
             const label: []const u8 = if (side == .client) "c e traffic" else "s e traffic";
-            self.buffer[0..hash_length].* = hkdfExpandLabel(Hkdf, early_secret, label, hello_hash, hash_length);
+            self.buffer[0..hash_length].* = hkdfExpandLabel(Hkdf, early_secret, label, &hello_hash, hash_length);
             return self.buffer[0..hash_length];
         }
 
