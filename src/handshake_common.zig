@@ -52,6 +52,9 @@ pub const CertKeyPair = struct {
     /// signatures with the same key to not repeat that operation.
     ecdsa_key_pair: ?EcdsaKeyPair = null,
 
+    /// Pre-serialized TLS 1.3 Certificate handshake message (type + len + body).
+    tls13_certificate_msg: []const u8 = &.{},
+
     pub fn fromFilePath(
         allocator: mem.Allocator,
         io: Io,
@@ -59,14 +62,16 @@ pub const CertKeyPair = struct {
         cert_path: []const u8,
         key_path: []const u8,
     ) !CertKeyPair {
-        var bundle: cert.Bundle = .{};
+        var bundle: cert.Bundle = .empty;
         try bundle.addCertsFromFilePath(allocator, dir, cert_path);
 
         const key_file = try dir.openFile(io, key_path, .{});
         defer key_file.close(io);
         const key = try PrivateKey.fromFile(allocator, key_file);
 
-        return .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        try pair.cacheTls13CertificateMessage(allocator);
+        return pair;
     }
 
     pub fn fromFilePathAbsolute(
@@ -75,7 +80,7 @@ pub const CertKeyPair = struct {
         cert_path: []const u8,
         key_path: []const u8,
     ) !CertKeyPair {
-        var bundle: cert.Bundle = .{};
+        var bundle: cert.Bundle = .empty;
         const now = try Io.Clock.real.now(io);
         try bundle.addCertsFromFilePathAbsolute(allocator, io, now, cert_path);
 
@@ -83,7 +88,9 @@ pub const CertKeyPair = struct {
         defer key_file.close(io);
         const key = try PrivateKey.fromFile(allocator, key_file);
 
-        return .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        try pair.cacheTls13CertificateMessage(allocator);
+        return pair;
     }
 
     /// Reads certs directly from PEM files (delegates to fromFilePathAbsolute)
@@ -114,7 +121,7 @@ pub const CertKeyPair = struct {
         }
 
         // Parse PEM certificates manually
-        var bundle: cert.Bundle = .{};
+        var bundle: cert.Bundle = .empty;
         const pem_data = cert_buf[0..cert_len];
 
         // Find and decode PEM blocks - add DER bytes directly to bundle
@@ -158,10 +165,72 @@ pub const CertKeyPair = struct {
         }
         const key = try PrivateKey.parsePem(key_buf[0..key_len]);
 
-        return .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        try pair.cacheTls13CertificateMessage(allocator);
+        return pair;
+    }
+
+    fn addCertsFromPem(bundle: *cert.Bundle, allocator: mem.Allocator, pem: []const u8, now_sec: i64) !void {
+        const begin_marker = "-----BEGIN CERTIFICATE-----";
+        const end_marker = "-----END CERTIFICATE-----";
+        const base64_decoder = std.base64.standard.decoderWithIgnore(" \t\r\n");
+        var start_index: usize = 0;
+        while (mem.indexOfPos(u8, pem, start_index, begin_marker)) |begin_marker_start| {
+            const cert_start = begin_marker_start + begin_marker.len;
+            const cert_end = mem.indexOfPos(u8, pem, cert_start, end_marker) orelse break;
+            start_index = cert_end + end_marker.len;
+            const encoded_cert = mem.trim(u8, pem[cert_start..cert_end], " \t\r\n");
+            const decoded_start: u32 = @intCast(bundle.bytes.items.len);
+            const upper = base64_decoder.calcSizeUpperBound(encoded_cert.len);
+            try bundle.bytes.ensureUnusedCapacity(allocator, upper);
+            const dest_buf = bundle.bytes.allocatedSlice()[decoded_start..];
+            const decoded_len = try base64_decoder.decode(dest_buf[0..upper], encoded_cert);
+            bundle.bytes.items.len = decoded_start + decoded_len;
+            try bundle.parseCert(allocator, decoded_start, now_sec);
+        }
+    }
+
+    /// Parse a certificate chain and private key from PEM strings.
+    pub fn fromPem(allocator: mem.Allocator, cert_pem: []const u8, key_pem: []const u8) !CertKeyPair {
+        var bundle: cert.Bundle = .empty;
+        // Bench/test credentials may be expired; use 0 so parseCert does not drop them.
+        try addCertsFromPem(&bundle, allocator, cert_pem, 0);
+        const key = try PrivateKey.parsePem(key_pem);
+        var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        try pair.cacheTls13CertificateMessage(allocator);
+        return pair;
+    }
+
+    fn buildTls13CertificateMessage(allocator: mem.Allocator, bundle: cert.Bundle) ![]u8 {
+        const certs = bundle.bytes.items;
+        const certs_count = bundle.map.size;
+        const extensions = [_]u8{ 0, 0 };
+        const certs_len = certs.len + (3 + extensions.len) * certs_count;
+        const body_len = 1 + 3 + certs_len;
+        const msg = try allocator.alloc(u8, 4 + body_len);
+        var w = record.Writer.init(msg);
+        try w.handshakeRecordHeader(.certificate, body_len);
+        try w.byte(0);
+        try w.int(u24, certs_len);
+        var index: u32 = 0;
+        while (index < certs.len) {
+            const e = try Certificate.der.Element.parse(certs, index);
+            const crt = certs[index..e.slice.end];
+            try w.int(u24, crt.len);
+            try w.slice(crt);
+            try w.slice(&extensions);
+            index = e.slice.end;
+        }
+        return msg;
+    }
+
+    pub fn cacheTls13CertificateMessage(c: *CertKeyPair, allocator: mem.Allocator) !void {
+        if (c.bundle.map.size == 0) return;
+        c.tls13_certificate_msg = try buildTls13CertificateMessage(allocator, c.bundle);
     }
 
     pub fn deinit(c: *CertKeyPair, allocator: mem.Allocator) void {
+        if (c.tls13_certificate_msg.len != 0) allocator.free(c.tls13_certificate_msg);
         c.bundle.deinit(allocator);
     }
 
@@ -200,19 +269,19 @@ pub const cert = struct {
     pub const Bundle = crypto.Certificate.Bundle;
 
     pub fn fromFilePath(allocator: mem.Allocator, dir: std.fs.Dir, path: []const u8) !Bundle {
-        var bundle: Bundle = .{};
+        var bundle: Bundle = .empty;
         try bundle.addCertsFromFilePath(allocator, dir, path);
         return bundle;
     }
 
     pub fn fromFilePathAbsolute(allocator: mem.Allocator, path: []const u8) !Bundle {
-        var bundle: Bundle = .{};
+        var bundle: Bundle = .empty;
         try bundle.addCertsFromFilePathAbsolute(allocator, path);
         return bundle;
     }
 
     pub fn fromSystem(allocator: mem.Allocator) !Bundle {
-        var bundle: Bundle = .{};
+        var bundle: Bundle = .empty;
         try bundle.rescan(allocator);
         return bundle;
     }
@@ -225,6 +294,10 @@ pub const CertificateBuilder = struct {
     side: proto.Side = .client,
 
     pub fn makeCertificate(h: CertificateBuilder, w: *record.Writer) !void {
+        if (h.tls_version == .tls_1_3 and h.cert_key_pair.tls13_certificate_msg.len != 0) {
+            try w.slice(h.cert_key_pair.tls13_certificate_msg);
+            return;
+        }
         const certs = h.cert_key_pair.bundle.bytes.items;
         const certs_count = h.cert_key_pair.bundle.map.size;
 
@@ -268,9 +341,25 @@ pub const CertificateBuilder = struct {
                     .ecdsa_secp384r1_sha384 => h.cert_key_pair.ecdsa_key_pair.?.ecdsa_secp384r1_sha384,
                     else => unreachable,
                 };
-                var signer = try key_pair.signer(null);
-                h.setSignatureVerifyBytes(&signer);
-                const signature = try signer.finalize();
+                const signature = switch (h.tls_version) {
+                    .tls_1_2 => blk: {
+                        var hash_state = h.transcript.hash(switch (comptime_scheme) {
+                            .ecdsa_secp256r1_sha256 => crypto.hash.sha2.Sha256,
+                            .ecdsa_secp384r1_sha384 => crypto.hash.sha2.Sha384,
+                            else => unreachable,
+                        });
+                        const digest = hash_state.finalResult();
+                        break :blk try key_pair.signPrehashed(digest, null);
+                    },
+                    .tls_1_3 => blk: {
+                        const verify_bytes = if (h.side == .server)
+                            h.transcript.serverCertificateVerify()
+                        else
+                            h.transcript.clientCertificateVerify();
+                        break :blk try key_pair.sign(verify_bytes, null);
+                    },
+                    else => unreachable,
+                };
                 var buf: [Ecdsa.Signature.der_encoded_length_max]u8 = undefined;
                 break :brk .{ signature.toDer(&buf), comptime_scheme };
             },
@@ -334,6 +423,15 @@ pub const CertificateParser = struct {
     host: []const u8,
     skip_verify: bool = false,
     now_sec: i64 = 0,
+
+    pub fn skipCertificate(d: *record.Decoder, tls_version: proto.Version) !void {
+        if (tls_version == .tls_1_3) {
+            _ = try d.decode(u8);
+        }
+        const certs_len = try d.decode(u24);
+        if (d.idx + certs_len > d.payload.len) return error.TlsDecodeError;
+        d.idx += certs_len;
+    }
 
     pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
         if (h.now_sec == 0) {
@@ -516,8 +614,7 @@ pub const DhKeyPair = struct {
                 .secp384r1 => kp.secp384r1_kp = try EcdsaP384Sha384.KeyPair.generateDeterministic(seed[32 + 32 ..][0..EcdsaP384Sha384.KeyPair.seed_length].*),
                 .x25519_ml_kem768 => kp.ml_kem768 = try MLKem768.KeyPair.generateDeterministic(seed[32 + 32 + 48 + 64 ..][0..MLKem768.seed_length].*),
                 .ffdhe2048 => kp.ffdhe2048_kp = try Ffdhe2048.generateDeterministic(seed[32 + 32 + 48 + 64 + 64 ..][0..32].*),
-                // x448 and secp521r1 are advertised but need std.crypto curve support.
-                .x448, .secp521r1 => {},
+                .x448, .secp521r1 => return error.TlsIllegalParameter,
                 else => return error.TlsIllegalParameter,
             };
         return kp;
@@ -601,6 +698,35 @@ pub const hello_retry_request_random: [32]u8 = .{
 
 const testing = std.testing;
 const testu = @import("testu.zig");
+
+test "CertKeyPair.fromPem loads P-256 credentials" {
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIBfDCCASOgAwIBAgIUQLqOnCo7H/bJUF1Szr+llCjaUDQwCgYIKoZIzj0EAwIw
+        \\FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDYwODE2NDI0NVoXDTM2MDYwNTE2
+        \\NDI0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+        \\AQcDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4G20Q
+        \\q0dJ3jaRBz8MMglQClooPnY3Z3iNJKNTMFEwHQYDVR0OBBYEFKCBVZdchts7bXZB
+        \\ZWuL8eNAdz/YMB8GA1UdIwQYMBaAFKCBVZdchts7bXZBZWuL8eNAdz/YMA8GA1Ud
+        \\EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgcbi5sqviAW6/cB5IceGx2aBG
+        \\mURelDq3gDVCXdGXhuoCIHgffOqfX89M1r8Hax8HY7MACM+wnevA7UDIurNdCUUU
+        \\-----END CERTIFICATE-----
+    ;
+    const key_pem =
+        \\-----BEGIN EC PRIVATE KEY-----
+        \\MHcCAQEEIKpmzT0Wdz4OucLI2ZaHsBjBsSLW4rqsmjMoDhmegFKdoAoGCCqGSM49
+        \\AwEHoUQDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4
+        \\G20Qq0dJ3jaRBz8MMglQClooPnY3Z3iNJA==
+        \\-----END EC PRIVATE KEY-----
+    ;
+    var pair = try CertKeyPair.fromPem(testing.allocator, cert_pem, key_pem);
+    defer pair.deinit(testing.allocator);
+    try testing.expect(pair.bundle.map.size > 0);
+    try testing.expect(pair.bundle.bytes.items.len > 0);
+    try testing.expect(pair.tls13_certificate_msg.len > 0);
+    try testing.expect(pair.ecdsa_key_pair != null);
+    try testing.expectEqual(.ecdsa_secp256r1_sha256, pair.key.signature_scheme);
+}
 
 test "DhKeyPair.x25519" {
     var seed: [DhKeyPair.seed_len]u8 = undefined;

@@ -39,16 +39,16 @@ zig build -Dfuzz=true fuzz   # fuzz binaries in zig-out/bin/
 ## Interop Evidence
 
 ```bash
-# Against local test server (see examples/test_server.zig)
-testssl.sh --quiet --color 0 localhost:8443
+./scripts/testssl.sh localhost 8443
 ```
 
 ## Known Limitations (document for auditor)
 
 - TLS 1.2 static RSA key exchange: server decrypt path implemented; legacy export ciphers still unsupported
 - HelloRetryRequest: implemented for preferred-group mismatch; stateless cookie is connection-scoped (16-byte random)
-- 0-RTT early data: client send and server decrypt with PSK binder verification; `max_early_data` advertised in EncryptedExtensions
-- FFDHE2048: implemented (RFC 7919); x448 and secp521r1 negotiate but require future `std.crypto` curve support
+- 0-RTT early data: client send and server decrypt with PSK binder verification; disabled by default (`Server.max_early_data_size = 0`); set `> 0` to accept early data on PSK resume
+- FFDHE2048: implemented (RFC 7919); x448 and secp521r1 are rejected if listed in `named_groups` (awaiting `std.crypto` support)
+- Record crypto: optional BoringSSL-derived AES-GCM assembly on AArch64/x86_64 (`src/crypto/*/NOTICE`)
 
 ## Bun Integration Surface
 

@@ -80,8 +80,8 @@ pub const Options = struct {
     /// Send HelloRetryRequest when the client key_share does not match the preferred group.
     send_hello_retry_for_preferred_group: bool = true,
 
-    /// Maximum 0-RTT early data accepted from clients (bytes).
-    max_early_data_size: u32 = 16384,
+    /// Maximum 0-RTT early data accepted from clients (bytes). Zero disables 0-RTT.
+    max_early_data_size: u32 = 0,
 
     pub const SNICallback = *const fn (
         ctx: ?*anyopaque,
@@ -741,8 +741,18 @@ pub const Handshake = struct {
         }
         try w.record(.change_cipher_spec, &[_]u8{1});
         {
-            var ee_buf: [256]u8 = undefined;
-            var ee_w = record.Writer.init(&ee_buf);
+            var flight_buf: [4096]u8 = undefined;
+            var flight_len: usize = 0;
+            const appendMsg = struct {
+                fn append(buf: []u8, len: *usize, msg: []const u8) !void {
+                    if (len.* + msg.len > buf.len) return error.TlsCipherNoSpaceLeft;
+                    @memcpy(buf[len.*..][0..msg.len], msg);
+                    len.* += msg.len;
+                }
+            }.append;
+
+            var ee_body: [256]u8 = undefined;
+            var ee_w = record.Writer.init(&ee_body);
             var ext_bytes: usize = 0;
             if (h.selected_alpn) |p| ext_bytes += 4 + 1 + p.len;
             if (h.accept_early_data) ext_bytes += 4 + 4;
@@ -753,45 +763,50 @@ pub const Handshake = struct {
                 try ee_w.byte(@intCast(p.len));
                 try ee_w.slice(p);
             }
-            if (h.accept_early_data) {
+            if (h.accept_early_data and opt.max_early_data_size > 0) {
                 try ee_w.enumValue(proto.Extension.early_data);
                 try ee_w.int(u16, 4);
                 try ee_w.int(u32, opt.max_early_data_size);
             }
-            var hw = try w.writerAdvance(record.header_len);
-            try hw.handshakeRecord(.encrypted_extensions, ee_w.buffered());
-            h.transcript.update(hw.buffered());
-            try h.writeEncrypted(&w, hw.buffered());
-        }
-        if (opt.client_auth) |_| { // Certificate request
-            var hw = try w.writerAdvance(record.header_len);
-            try makeCertificateRequest(&hw);
-            h.transcript.update(hw.buffered());
-            try h.writeEncrypted(&w, hw.buffered());
-        }
-        if (opt.auth) |auth| {
-            const cb = CertificateBuilder{
-                .cert_key_pair = auth,
-                .transcript = &h.transcript,
-                .side = .server,
-            };
-            { // Certificate
-                var hw = try w.writerAdvance(record.header_len);
-                try cb.makeCertificate(&hw);
-                h.transcript.update(hw.buffered());
-                try h.writeEncrypted(&w, hw.buffered());
+            var ee_msg: [300]u8 = undefined;
+            var ee_hw = record.Writer.init(&ee_msg);
+            try ee_hw.handshakeRecord(.encrypted_extensions, ee_w.buffered());
+            h.transcript.update(ee_hw.buffered());
+            try appendMsg(&flight_buf, &flight_len, ee_hw.buffered());
+
+            if (opt.client_auth) |_| {
+                var cr_msg: [512]u8 = undefined;
+                var cr_hw = record.Writer.init(&cr_msg);
+                try makeCertificateRequest(&cr_hw);
+                h.transcript.update(cr_hw.buffered());
+                try appendMsg(&flight_buf, &flight_len, cr_hw.buffered());
             }
-            { // Certificate verify
-                var hw = try w.writerAdvance(record.header_len);
-                try cb.makeCertificateVerify(&hw);
-                h.transcript.update(hw.buffered());
-                try h.writeEncrypted(&w, hw.buffered());
+            if (opt.auth) |auth| {
+                const cb = CertificateBuilder{
+                    .cert_key_pair = auth,
+                    .transcript = &h.transcript,
+                    .side = .server,
+                };
+                var cert_msg: [1024]u8 = undefined;
+                var cert_hw = record.Writer.init(&cert_msg);
+                try cb.makeCertificate(&cert_hw);
+                h.transcript.update(cert_hw.buffered());
+                try appendMsg(&flight_buf, &flight_len, cert_hw.buffered());
+
+                var cv_msg: [512]u8 = undefined;
+                var cv_hw = record.Writer.init(&cv_msg);
+                try cb.makeCertificateVerify(&cv_hw);
+                h.transcript.update(cv_hw.buffered());
+                try appendMsg(&flight_buf, &flight_len, cv_hw.buffered());
             }
-        }
-        { // Finished
+            var fin_msg: [64]u8 = undefined;
+            var fin_hw = record.Writer.init(&fin_msg);
+            try fin_hw.handshakeRecord(.finished, h.transcript.serverFinishedTls13());
+            h.transcript.update(fin_hw.buffered());
+            try appendMsg(&flight_buf, &flight_len, fin_hw.buffered());
+
             var hw = try w.writerAdvance(record.header_len);
-            try hw.handshakeRecord(.finished, h.transcript.serverFinishedTls13());
-            h.transcript.update(hw.buffered());
+            try hw.slice(flight_buf[0..flight_len]);
             try h.writeEncrypted(&w, hw.buffered());
         }
 

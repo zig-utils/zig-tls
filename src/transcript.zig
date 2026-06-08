@@ -27,6 +27,9 @@ pub const Transcript = struct {
     sha512: Type(.sha512) = .{ .hash = Sha512.init(.{}) },
 
     tag: HashTag = .sha256,
+    /// After cipher suite selection, only update `tag` (and `extra_hash` when set).
+    single_hash: bool = false,
+    extra_hash: ?HashTag = null,
 
     // Transcript Type from hash tag
     fn Type(h: HashTag) type {
@@ -40,12 +43,47 @@ pub const Transcript = struct {
     /// Set hash to use in all following function calls.
     pub fn use(t: *Transcript, tag: HashTag) void {
         t.tag = tag;
+        t.single_hash = true;
+        t.extra_hash = null;
+    }
+
+    pub fn useWithSignatureScheme(t: *Transcript, tag: HashTag, scheme: @import("protocol.zig").SignatureScheme) void {
+        t.tag = tag;
+        t.single_hash = true;
+        const sig_hash = hashTagForSignatureScheme(scheme);
+        t.extra_hash = if (sig_hash == tag) null else sig_hash;
+    }
+
+    fn hashTagForSignatureScheme(scheme: @import("protocol.zig").SignatureScheme) HashTag {
+        return switch (scheme) {
+            .ecdsa_secp256r1_sha256,
+            .rsa_pss_rsae_sha256,
+            .rsa_pkcs1_sha256,
+            .ed25519,
+            => .sha256,
+            .ecdsa_secp384r1_sha384,
+            .rsa_pss_rsae_sha384,
+            .rsa_pkcs1_sha384,
+            => .sha384,
+            .rsa_pss_rsae_sha512,
+            .rsa_pkcs1_sha512,
+            => .sha512,
+            else => .sha256,
+        };
     }
 
     pub fn update(t: *Transcript, buf: []const u8) void {
-        t.sha256.hash.update(buf);
-        t.sha384.hash.update(buf);
-        t.sha512.hash.update(buf);
+        if (!t.single_hash) {
+            t.sha256.hash.update(buf);
+            t.sha384.hash.update(buf);
+            t.sha512.hash.update(buf);
+            return;
+        }
+        inline for (.{ .sha256, .sha384, .sha512 }) |h| {
+            if (t.tag == h or t.extra_hash == h) {
+                @field(t, @tagName(h)).hash.update(buf);
+            }
+        }
     }
 
     // tls 1.2 handshake specific

@@ -170,6 +170,7 @@ test "0-RTT early data server decrypt" {
         .named_groups = groups,
         .session_tickets = .{ .keys = keys },
         .send_hello_retry_for_preferred_group = false,
+        .max_early_data_size = 16384,
         .min_version = .tls_1_3,
         .max_version = .tls_1_3,
     };

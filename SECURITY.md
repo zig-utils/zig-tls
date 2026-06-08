@@ -16,9 +16,10 @@ timeline within 7 days for critical issues.
 
 ## Security Properties
 
-zig-tls is a pure Zig TLS 1.2/1.3 implementation with:
+zig-tls is a Zig TLS 1.2/1.3 implementation with:
 
-- No C dependencies in the TLS core (reduced supply-chain attack surface)
+- No C code in the TLS protocol core; optional vendored AES-GCM assembly on AArch64/x86_64 (Apache 2.0, see `src/crypto/*/NOTICE`)
+- 0-RTT early data disabled by default (`Server.max_early_data_size = 0`); enable explicitly when needed
 - Bounded record buffers (max 16 KiB cleartext per RFC 8446)
 - Constant-time RSA decryption paths (see `src/rsa/rsa.zig`)
 - No TLS renegotiation (aligned with BoringSSL policy)
