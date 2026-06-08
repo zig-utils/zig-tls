@@ -23,8 +23,8 @@ cmake --build /tmp/boringssl/build -j
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Handshake TLS 1.3 (minimal ECDHE) | **~7800 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~5800 /s** | ~6600 /s | **~0.88×** |
+| Handshake TLS 1.3 (minimal ECDHE) | **~8300 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6500 /s** | ~6500 /s | **~1.00×** |
 | Transfer send AES-128-GCM (16 KiB) | **~8800 MB/s** | ~8800 MB/s | **~1.00×** |
 | Transfer recv AES-128-GCM (16 KiB) | **~8100 MB/s** | ~8300 MB/s | ~0.98× |
 | Transfer send AES-256-GCM (16 KiB) | ~7700 MB/s | ~8000 MB/s | ~0.97× |
@@ -40,7 +40,7 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | Near parity (~12% gap; nistz base-point table) |
+| Cert handshake | **Parity** (nistz zero-digit fix) |
 | Transfer AES-128 | Parity |
 | Transfer AES-256 | Parity |
 
@@ -77,7 +77,7 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.
 - **nistz base-point table:** Gueron–Krasnov 37×64 affine precompute (`p256/nistz_table.zig`)
-  for `k×G` on the signing path.
+  for `k×G` on the signing path. Zero Booth digits skip adds (no spurious doubles).
 
 ## Regression tracking
 
