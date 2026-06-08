@@ -511,6 +511,7 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
         decrypt_iv: [nonce_len]u8,
         encrypt_npub: [nonce_len]u8 = undefined,
         decrypt_npub: [nonce_len]u8 = undefined,
+        cached_app_payload_len: u16 = 0xffff,
         encrypt_seq: u64 = 0,
         decrypt_seq: u64 = 0,
         gcm_enc: if (has_cached_gcm) GcmCtx else void = undefined,
@@ -575,12 +576,14 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
         pub fn keyUpdateEncrypt(self: *Self) void {
             self.encrypt_secret = hkdfExpandLabel(Hkdf, self.encrypt_secret, "traffic upd", "", digest_len);
             self.encrypt_seq = 0;
+            self.cached_app_payload_len = 0xffff;
             self.keyGenerate();
         }
 
         pub fn keyUpdateDecrypt(self: *Self) void {
             self.decrypt_secret = hkdfExpandLabel(Hkdf, self.decrypt_secret, "traffic upd", "", digest_len);
             self.decrypt_seq = 0;
+            self.cached_app_payload_len = 0xffff;
             self.keyGenerate();
         }
 
@@ -634,10 +637,14 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const record_len = record.header_len + payload_len;
             if (buf.len < record_len) return error.TlsCipherNoSpaceLeft;
 
-            buf[0] = @intFromEnum(proto.ContentType.application_data);
-            buf[1] = 0x03;
-            buf[2] = 0x03;
-            mem.writeInt(u16, buf[3..5], @intCast(payload_len), .big);
+            const payload_len_u16: u16 = @intCast(payload_len);
+            if (self.cached_app_payload_len != payload_len_u16) {
+                buf[0] = @intFromEnum(proto.ContentType.application_data);
+                buf[1] = 0x03;
+                buf[2] = 0x03;
+                mem.writeInt(u16, buf[3..5], payload_len_u16, .big);
+                self.cached_app_payload_len = payload_len_u16;
+            }
             buf[record.header_len + cleartext_len] = @intFromEnum(proto.ContentType.application_data);
 
             const ciphertext = buf[record.header_len..][0 .. cleartext_len + 1];

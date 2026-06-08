@@ -17,11 +17,38 @@ pub fn CachedAesGcm(comptime Aes: type) type {
 
         aes: AesCtx,
         h: [16]u8,
+        /// GHASH state after the padded 5-byte TLS 1.3 AD block (keyed by record payload length).
+        tls13_mac_after_ad: Ghash = undefined,
+        tls13_payload_len: u16 = 0xffff,
 
         pub fn fromKey(key: [key_length]u8) @This() {
             var ctx: @This() = .{ .aes = Aes.initEnc(key), .h = undefined };
             ctx.aes.encrypt(&ctx.h, &@splat(0));
             return ctx;
+        }
+
+        fn ensureTls13MacAfterAd(ctx: *@This(), ad: *const [5]u8) void {
+            const payload_len = mem.readInt(u16, ad[3..5], .big);
+            if (ctx.tls13_payload_len == payload_len) return;
+            var ad_block: [16]u8 = undefined;
+            @memcpy(ad_block[0..5], ad);
+            @memset(ad_block[5..], 0);
+            const ct_len = payload_len - tag_length;
+            const ct_blocks = (ct_len + Ghash.block_length - 1) / Ghash.block_length;
+            var mac = Ghash.initForBlockCount(&ctx.h, 1 + ct_blocks + 1);
+            mac.update(&ad_block);
+            mac.pad();
+            ctx.tls13_mac_after_ad = mac;
+            ctx.tls13_payload_len = payload_len;
+        }
+
+        fn finishTls13Mac(mac: *Ghash, ct_len: usize, tag: *[tag_length]u8, t: *const [16]u8) void {
+            var final_block: [16]u8 = undefined;
+            mem.writeInt(u64, final_block[0..8], 40, .big);
+            mem.writeInt(u64, final_block[8..16], @as(u64, ct_len) * 8, .big);
+            mac.update(&final_block);
+            mem.writeInt(u128, tag[0..16], mac.acc, .big);
+            for (t, 0..) |x, i| tag[i] ^= x;
         }
 
         inline fn gcmBlockCount(ad_len: usize, c_len: usize) usize {
@@ -62,34 +89,28 @@ pub fn CachedAesGcm(comptime Aes: type) type {
 
         /// TLS 1.3 record path: AD is always the 5-byte record header.
         pub fn encryptTls13(
-            ctx: *const @This(),
+            ctx: *@This(),
             c: []u8,
             tag: *[tag_length]u8,
             m: []const u8,
             ad: *const [5]u8,
             npub: [nonce_length]u8,
         ) void {
+            ctx.ensureTls13MacAfterAd(ad);
+
             var t: [16]u8 = undefined;
             var j: [16]u8 = undefined;
             j[0..nonce_length].* = npub;
             mem.writeInt(u32, j[nonce_length..][0..4], 1, .big);
             ctx.aes.encrypt(&t, &j);
 
-            var mac = Ghash.initForBlockCount(&ctx.h, 1 + (c.len + 15) / 16 + 1);
-            mac.update(ad);
-            mac.pad();
-
             mem.writeInt(u32, j[nonce_length..][0..4], 2, .big);
             modes.ctr(@TypeOf(ctx.aes), ctx.aes, c, m, j, .big);
+
+            var mac = ctx.tls13_mac_after_ad;
             mac.update(c[0..m.len]);
             mac.pad();
-
-            var final_block: [16]u8 = undefined;
-            mem.writeInt(u64, final_block[0..8], 40, .big);
-            mem.writeInt(u64, final_block[8..16], @as(u64, m.len) * 8, .big);
-            mac.update(&final_block);
-            mac.final(tag);
-            for (t, 0..) |x, i| tag[i] ^= x;
+            finishTls13Mac(&mac, m.len, tag, &t);
         }
 
         pub fn decrypt(
@@ -133,32 +154,27 @@ pub fn CachedAesGcm(comptime Aes: type) type {
 
         /// TLS 1.3 record path: AD is always the 5-byte record header.
         pub fn decryptTls13(
-            ctx: *const @This(),
+            ctx: *@This(),
             m: []u8,
             c: []const u8,
             tag: [tag_length]u8,
             ad: *const [5]u8,
             npub: [nonce_length]u8,
         ) AuthenticationError!void {
+            ctx.ensureTls13MacAfterAd(ad);
+
             var t: [16]u8 = undefined;
             var j: [16]u8 = undefined;
             j[0..nonce_length].* = npub;
             mem.writeInt(u32, j[nonce_length..][0..4], 1, .big);
             ctx.aes.encrypt(&t, &j);
 
-            var mac = Ghash.initForBlockCount(&ctx.h, 1 + (c.len + 15) / 16 + 1);
-            mac.update(ad);
-            mac.pad();
+            var mac = ctx.tls13_mac_after_ad;
             mac.update(c);
             mac.pad();
 
-            var final_block: [16]u8 = undefined;
-            mem.writeInt(u64, final_block[0..8], 40, .big);
-            mem.writeInt(u64, final_block[8..16], @as(u64, m.len) * 8, .big);
-            mac.update(&final_block);
-            var computed_tag: [Ghash.mac_length]u8 = undefined;
-            mac.final(&computed_tag);
-            for (t, 0..) |x, i| computed_tag[i] ^= x;
+            var computed_tag: [tag_length]u8 = undefined;
+            finishTls13Mac(&mac, m.len, &computed_tag, &t);
 
             const verify = crypto.timing_safe.eql([tag_length]u8, computed_tag, tag);
             if (!verify) {
@@ -193,6 +209,26 @@ test "CachedAesGcm matches std" {
     ctx.encrypt(&c_cached, &tag_cached, m, ad, npub);
     try testing.expectEqualSlices(u8, &c_std, &c_cached);
     try testing.expectEqualSlices(u8, &tag_std, &tag_cached);
+}
+
+test "CachedAesGcm encryptTls13 reuses AD mac state" {
+    const Cached = CachedAesGcm(crypto.core.aes.Aes128);
+    var key: [16]u8 = undefined;
+    @memset(&key, 0x33);
+    var ctx = Cached.fromKey(key);
+    var npub: [12]u8 = undefined;
+    @memset(&npub, 0x44);
+    var ad: [5]u8 = .{ 0x17, 0x03, 0x03, 0x40, 0x11 };
+    const m = "repeatable-payload!!";
+    var c1: [m.len]u8 = undefined;
+    var c2: [m.len]u8 = undefined;
+    var tag1: [16]u8 = undefined;
+    var tag2: [16]u8 = undefined;
+    ctx.encryptTls13(&c1, &tag1, m, &ad, npub);
+    npub[11] +%= 1;
+    ctx.encryptTls13(&c2, &tag2, m, &ad, npub);
+    try testing.expect(!mem.eql(u8, &tag1, &tag2));
+    try testing.expectEqual(@as(u16, 0x4011), ctx.tls13_payload_len);
 }
 
 test "CachedAesGcm encryptTls13 matches generic" {
