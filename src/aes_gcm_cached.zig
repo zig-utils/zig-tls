@@ -24,6 +24,9 @@ pub fn CachedAesGcm(comptime Aes: type) type {
         /// GHASH state after the padded 5-byte TLS 1.3 AD block (keyed by record payload length).
         tls13_mac_after_ad: Ghash = undefined,
         tls13_payload_len: u16 = 0xffff,
+        tls13_tag_mask_npub: [nonce_length]u8 = @splat(0xff),
+        tls13_tag_mask: [16]u8 = undefined,
+        tls13_bulk_ivec: [16]u8 = undefined,
 
         pub fn fromKey(key: [key_length]u8) @This() {
             var ctx: @This() = .{ .aes = Aes.initEnc(key), .h = undefined };
@@ -48,6 +51,19 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             mac.pad();
             ctx.tls13_mac_after_ad = mac;
             ctx.tls13_payload_len = payload_len;
+        }
+
+        fn ensureTls13TagMask(ctx: *@This(), npub: [nonce_length]u8) void {
+            if (mem.eql(u8, &npub, &ctx.tls13_tag_mask_npub)) return;
+            var j: [16]u8 = undefined;
+            j[0..nonce_length].* = npub;
+            mem.writeInt(u32, j[nonce_length..][0..4], 1, .big);
+            ctx.aes.encrypt(&ctx.tls13_tag_mask, &j);
+            var ivec: [16]u8 = undefined;
+            ivec[0..nonce_length].* = npub;
+            mem.writeInt(u32, ivec[nonce_length..][0..4], 2, .big);
+            ctx.tls13_bulk_ivec = ivec;
+            ctx.tls13_tag_mask_npub = npub;
         }
 
         fn finishTls13Mac(mac: *Ghash, ct_len: usize, tag: *[tag_length]u8, t: *const [16]u8) void {
@@ -105,17 +121,13 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             npub: [nonce_length]u8,
         ) void {
             ctx.ensureTls13MacAfterAd(ad);
-
-            var t: [16]u8 = undefined;
-            var j: [16]u8 = undefined;
-            j[0..nonce_length].* = npub;
-            mem.writeInt(u32, j[nonce_length..][0..4], 1, .big);
-            ctx.aes.encrypt(&t, &j);
+            ctx.ensureTls13TagMask(npub);
+            const t = &ctx.tls13_tag_mask;
 
             if (comptime has_stitched_gcm) {
                 if (m.len >= hw_gcm.min_bulk_len) {
                     var xi = hw_gcm.xiFromAcc(ctx.tls13_mac_after_ad.acc);
-                    var ivec = hw_gcm.ctrIvec(npub, 2);
+                    var ivec = ctx.tls13_bulk_ivec;
                     const bulk = hw_gcm.encryptBulk(&ctx.hw_aes_key, &ctx.hw_htable, c[0..m.len], m, &xi, &ivec);
 
                     var mac = ctx.tls13_mac_after_ad;
@@ -125,18 +137,18 @@ pub fn CachedAesGcm(comptime Aes: type) type {
                         mac.update(c[bulk..m.len]);
                         mac.pad();
                     }
-                    finishTls13Mac(&mac, m.len, tag, &t);
+                    finishTls13Mac(&mac, m.len, tag, t);
                     return;
                 }
             }
 
-            mem.writeInt(u32, j[nonce_length..][0..4], 2, .big);
+            const j = ctx.tls13_bulk_ivec;
             modes.ctr(@TypeOf(ctx.aes), ctx.aes, c, m, j, .big);
 
             var mac = ctx.tls13_mac_after_ad;
             mac.update(c[0..m.len]);
             mac.pad();
-            finishTls13Mac(&mac, m.len, tag, &t);
+            finishTls13Mac(&mac, m.len, tag, t);
         }
 
         pub fn decrypt(
@@ -188,17 +200,13 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             npub: [nonce_length]u8,
         ) AuthenticationError!void {
             ctx.ensureTls13MacAfterAd(ad);
-
-            var t: [16]u8 = undefined;
-            var j: [16]u8 = undefined;
-            j[0..nonce_length].* = npub;
-            mem.writeInt(u32, j[nonce_length..][0..4], 1, .big);
-            ctx.aes.encrypt(&t, &j);
+            ctx.ensureTls13TagMask(npub);
+            const t = &ctx.tls13_tag_mask;
 
             if (comptime has_stitched_gcm) {
                 if (m.len >= hw_gcm.min_bulk_len) {
                     var xi = hw_gcm.xiFromAcc(ctx.tls13_mac_after_ad.acc);
-                    var ivec = hw_gcm.ctrIvec(npub, 2);
+                    var ivec = ctx.tls13_bulk_ivec;
                     const bulk = hw_gcm.decryptBulk(&ctx.hw_aes_key, &ctx.hw_htable, m[0..m.len], c, &xi, &ivec);
                     var mac = ctx.tls13_mac_after_ad;
                     mac.acc = hw_gcm.accFromXi(&xi);
@@ -208,7 +216,7 @@ pub fn CachedAesGcm(comptime Aes: type) type {
                         modes.ctr(@TypeOf(ctx.aes), ctx.aes, m[bulk..m.len], c[bulk..m.len], ivec, .big);
                     }
                     var computed_tag: [tag_length]u8 = undefined;
-                    finishTls13Mac(&mac, m.len, &computed_tag, &t);
+                    finishTls13Mac(&mac, m.len, &computed_tag, t);
                     const verify = crypto.timing_safe.eql([tag_length]u8, computed_tag, tag);
                     if (!verify) {
                         crypto.secureZero(u8, &computed_tag);
@@ -224,7 +232,7 @@ pub fn CachedAesGcm(comptime Aes: type) type {
             mac.pad();
 
             var computed_tag: [tag_length]u8 = undefined;
-            finishTls13Mac(&mac, m.len, &computed_tag, &t);
+            finishTls13Mac(&mac, m.len, &computed_tag, t);
 
             const verify = crypto.timing_safe.eql([tag_length]u8, computed_tag, tag);
             if (!verify) {
@@ -233,7 +241,7 @@ pub fn CachedAesGcm(comptime Aes: type) type {
                 return error.AuthenticationFailed;
             }
 
-            mem.writeInt(u32, j[nonce_length..][0..4], 2, .big);
+            const j = ctx.tls13_bulk_ivec;
             modes.ctr(@TypeOf(ctx.aes), ctx.aes, m, c, j, .big);
         }
     };

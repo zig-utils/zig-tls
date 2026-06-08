@@ -16,20 +16,20 @@ cmake -S /tmp/boringssl -B /tmp/boringssl/build -DCMAKE_BUILD_TYPE=Release
 cmake --build /tmp/boringssl/build -j
 ```
 
-## Latest run (2026-06-08, Apple M3 Pro)
+## Latest run (2026-06-07, Apple M3 Pro)
 
 **zig-tls:** zig `0.17.0-dev`, `-Doptimize=ReleaseFast -Dcpu=native`  
 **BoringSSL:** `/tmp/boringssl/build` Release (assembly enabled)
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Handshake TLS 1.3 (minimal ECDHE) | **~7540 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6610 /s** | ~6570 /s | **~1.01×** |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3800 /s** | — | — |
-| Transfer send AES-128-GCM (16 KiB) | **~8490 MB/s** | ~8360 MB/s | **~1.02×** |
-| Transfer recv AES-128-GCM (16 KiB) | **~8050 MB/s** | ~8160 MB/s | ~0.99× |
-| Transfer send AES-256-GCM (16 KiB) | **~7750 MB/s** | ~7680 MB/s | **~1.01×** |
-| Transfer recv AES-256-GCM (16 KiB) | **~7480 MB/s** | ~7530 MB/s | ~0.99× |
+| Handshake TLS 1.3 (minimal ECDHE) | **~8530 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6550 /s** | ~6970 /s | ~0.94× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3840 /s** | — | — |
+| Transfer send AES-128-GCM (16 KiB) | **~8740 MB/s** | ~8780 MB/s | ~0.99× |
+| Transfer recv AES-128-GCM (16 KiB) | **~8430 MB/s** | ~8390 MB/s | **~1.01×** |
+| Transfer send AES-256-GCM (16 KiB) | **~7960 MB/s** | ~8070 MB/s | ~0.99× |
+| Transfer recv AES-256-GCM (16 KiB) | **~7710 MB/s** | ~7840 MB/s | ~0.98× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
@@ -41,9 +41,10 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | **Parity** (nistz zero-digit fix) |
-| Transfer AES-128 | Parity |
-| Transfer AES-256 | Parity |
+| Cert handshake | BoringSSL (~6% ahead on latest run) |
+| Transfer AES-128 send | Parity |
+| Transfer AES-128 recv | **zig-tls** (tag-mask cache) |
+| Transfer AES-256 | BoringSSL (~1–2%) |
 
 ## Methodology
 
@@ -95,8 +96,15 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   incrementally (no `serverCertificateVerify` buffer assembly) before ECDSA `verifyPrehashed`.
 - **Multi-cert leaf prewarm:** `prewarmTrustedLeaf` scans `root_ca` for a hostname match and
   caches pubkey/validity before the first handshake (not limited to single-cert bundles).
-- **Bedrock coord add/sub** (`p256_coord.zig`): foundation for future nistz point-add
-  (`addMixedVarTime` wrapper present; not wired into `mulBase` until equivalence tests pass).
+- **ECDSA verify fast path:** `ecdsa_p256.verifyPrehashed` uses `mulDoubleBasePublic`
+  (Shamir u1·G + u2·Q) instead of two separate `mulPublic` + `add`; base-point `mulPublic`
+  routes through nistz `mulBase`.
+- **ECDSA pubkey precompute:** leaf P-256 public keys cache a width-8 mul table in
+  `CertificateParser` so repeated `CertificateVerify` skips `precompute(p, 8)`.
+- **TLS 1.3 GCM nonce cache:** `CachedAesGcm` reuses the counter=1 tag mask and counter=2
+  CTR ivec per record nonce (bench transfer path uses a fixed nonce).
+- **Bedrock coord add/sub** (`p256_coord.zig`): BoringSSL no longer ships nistz
+  `point_add_affine` asm (Bedrock C in current tree); `mulBase` stays on Algorithm 5 `addMixed`.
   (OpenSSL/BoringSSL nistz formulas need coord add/sub, not fiat Montgomery add/sub).
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.
