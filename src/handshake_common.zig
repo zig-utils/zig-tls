@@ -546,24 +546,7 @@ pub const CertificateParser = struct {
         h.prewarmed_trusted.count += 1;
     }
 
-    /// Index trusted root_ca certificates and pre-parse a single-cert leaf when possible.
-    pub fn prewarmTrustedLeaf(h: *CertificateParser) !void {
-        if (h.skip_verify) return;
-
-        var it = h.root_ca.map.iterator();
-        while (it.next()) |entry| {
-            const bytes_index = entry.value_ptr.*;
-            const der = bundleDerSpan(h.root_ca, bytes_index) orelse continue;
-            h.indexPrewarmedTrusted(bytes_index, der);
-        }
-
-        if (h.cached_leaf_ready or h.root_ca.map.count() != 1) return;
-        it = h.root_ca.map.iterator();
-        const entry = it.next() orelse return;
-        const bytes_index = entry.value_ptr.*;
-        const der = bundleDerSpan(h.root_ca, bytes_index) orelse return;
-        const entry_cert: Certificate = .{ .buffer = h.root_ca.bytes.items, .index = bytes_index };
-        const subject = try entry_cert.parse();
+    fn cachePrewarmedLeaf(h: *CertificateParser, bytes_index: u32, der: []const u8, subject: Certificate.Parsed) !void {
         if (h.host.len > 0) {
             try subject.verifyHostName(h.host);
             h.cached_host_ok = true;
@@ -575,7 +558,36 @@ pub const CertificateParser = struct {
         h.cached_leaf_der_len = @intCast(der.len);
         h.cached_not_before = subject.validity.not_before;
         h.cached_not_after = subject.validity.not_after;
+        h.indexPrewarmedTrusted(bytes_index, der);
         h.cached_leaf_ready = true;
+    }
+
+    /// Index trusted root_ca certificates and pre-parse a matching leaf when possible.
+    pub fn prewarmTrustedLeaf(h: *CertificateParser) !void {
+        if (h.skip_verify or h.cached_leaf_ready) return;
+
+        var it = h.root_ca.map.iterator();
+        while (it.next()) |entry| {
+            const bytes_index = entry.value_ptr.*;
+            const der = bundleDerSpan(h.root_ca, bytes_index) orelse continue;
+            h.indexPrewarmedTrusted(bytes_index, der);
+        }
+
+        it = h.root_ca.map.iterator();
+        while (it.next()) |entry| {
+            const bytes_index = entry.value_ptr.*;
+            const der = bundleDerSpan(h.root_ca, bytes_index) orelse continue;
+            const entry_cert: Certificate = .{ .buffer = h.root_ca.bytes.items, .index = bytes_index };
+            const subject = try entry_cert.parse();
+            if (h.host.len > 0) {
+                subject.verifyHostName(h.host) catch |err| switch (err) {
+                    error.CertificateHostMismatch => continue,
+                    else => return err,
+                };
+            }
+            try h.cachePrewarmedLeaf(bytes_index, der, subject);
+            return;
+        }
     }
 
     pub fn skipCertificate(d: *record.Decoder, tls_version: proto.Version) !void {
@@ -695,6 +707,44 @@ pub const CertificateParser = struct {
             },
             .rsaEncryption => h.rsa_pk = try rsa.PublicKey.fromDer(h.pub_key),
             else => {},
+        }
+    }
+
+    pub const CertificateVerifySide = enum { server, client };
+
+    pub fn verifySignatureTranscript(h: *CertificateParser, transcript: *Transcript, side: CertificateVerifySide) !void {
+        switch (h.signature_scheme) {
+            .ecdsa_secp256r1_sha256 => {
+                if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
+                if (h.pub_key_algo.X9_62_id_ecPublicKey != .X9_62_prime256v1) return error.TlsUnknownSignatureScheme;
+                const key = h.ecdsa_p256_pk orelse try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
+                const sig = try ecdsa_p256.signatureFromDerTls(h.signature);
+                var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+                switch (side) {
+                    .server => transcript.serverCertificateVerifyDigest(&digest),
+                    .client => transcript.clientCertificateVerifyDigest(&digest),
+                }
+                try sig.verifyPrehashed(digest, key);
+            },
+            .ecdsa_secp384r1_sha384 => {
+                if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
+                if (h.pub_key_algo.X9_62_id_ecPublicKey != .secp384r1) return error.TlsUnknownSignatureScheme;
+                const key = h.ecdsa_p384_pk orelse try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key);
+                const sig = try EcdsaP384Sha384.Signature.fromDer(h.signature);
+                var digest: [crypto.hash.sha2.Sha384.digest_length]u8 = undefined;
+                switch (side) {
+                    .server => transcript.serverCertificateVerifyDigestSha384(&digest),
+                    .client => transcript.clientCertificateVerifyDigestSha384(&digest),
+                }
+                try sig.verifyPrehashed(digest, key);
+            },
+            else => {
+                const verify_bytes = switch (side) {
+                    .server => transcript.serverCertificateVerify(),
+                    .client => transcript.clientCertificateVerify(),
+                };
+                try h.verifySignature(verify_bytes);
+            },
         }
     }
 

@@ -24,8 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~7540 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6155 /s** | ~6410 /s | **~0.96×** |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3000 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6500 /s** | ~6830 /s | **~0.95×** |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3100 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8490 MB/s** | ~8360 MB/s | **~1.02×** |
 | Transfer recv AES-128-GCM (16 KiB) | **~8050 MB/s** | ~8160 MB/s | ~0.99× |
 | Transfer send AES-256-GCM (16 KiB) | **~7750 MB/s** | ~7680 MB/s | **~1.01×** |
@@ -91,6 +91,10 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   for O(n) trusted-anchor lookup without repeated `memcmp` over the bundle.
 - **P-256 CertificateVerify DER:** `signatureFromDerTls` fast-paths the usual 70–72 byte
   ECDSA SEQUENCE before falling back to the generic DER reader (~3000/s verify handshake).
+- **CertificateVerify digest:** `verifySignatureTranscript` hashes the TLS 1.3 padded context
+  incrementally (no `serverCertificateVerify` buffer assembly) before ECDSA `verifyPrehashed`.
+- **Multi-cert leaf prewarm:** `prewarmTrustedLeaf` scans `root_ca` for a hostname match and
+  caches pubkey/validity before the first handshake (not limited to single-cert bundles).
 - **Bedrock coord add/sub** (`p256_coord.zig`): foundation for future nistz point-add
   (`addMixedVarTime` wrapper present; not wired into `mulBase` until equivalence tests pass).
   (OpenSSL/BoringSSL nistz formulas need coord add/sub, not fiat Montgomery add/sub).

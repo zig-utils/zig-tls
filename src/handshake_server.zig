@@ -874,7 +874,7 @@ pub const Handshake = struct {
                             },
                             .certificate_verify => {
                                 try crt_parser.parseCertificateVerify(&d);
-                                crt_parser.verifySignature(h.transcript.clientCertificateVerify()) catch |err| return switch (err) {
+                                crt_parser.verifySignatureTranscript(&h.transcript, .client) catch |err| return switch (err) {
                                     error.TlsUnknownSignatureScheme => error.TlsIllegalParameter,
                                     else => error.TlsDecryptError,
                                 };

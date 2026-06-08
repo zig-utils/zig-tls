@@ -868,7 +868,7 @@ pub const Handshake = struct {
                             .certificate_verify => {
                                 if (!h.cert.skip_verify) {
                                     try h.cert.parseCertificateVerify(&d);
-                                    try h.cert.verifySignature(h.transcript.serverCertificateVerify());
+                                    try h.cert.verifySignatureTranscript(&h.transcript, .server);
                                 } else {
                                     try d.skip(length);
                                 }

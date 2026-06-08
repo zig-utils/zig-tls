@@ -164,6 +164,49 @@ pub const Transcript = struct {
         };
     }
 
+    pub fn peek(t: *Transcript) []const u8 {
+        return switch (t.tag) {
+            inline else => |h| blk: {
+                const digest = @field(t, @tagName(h)).hash.peek();
+                break :blk digest[0..];
+            },
+        };
+    }
+
+    const certificate_verify_pad = @as([64]u8, @splat(0x20));
+
+    pub fn serverCertificateVerifyDigest(t: *Transcript, out: *[Sha256.digest_length]u8) void {
+        var h = Sha256.init(.{});
+        h.update(&certificate_verify_pad);
+        h.update("TLS 1.3, server CertificateVerify\x00");
+        h.update(t.peek());
+        h.final(out);
+    }
+
+    pub fn clientCertificateVerifyDigest(t: *Transcript, out: *[Sha256.digest_length]u8) void {
+        var h = Sha256.init(.{});
+        h.update(&certificate_verify_pad);
+        h.update("TLS 1.3, client CertificateVerify\x00");
+        h.update(t.peek());
+        h.final(out);
+    }
+
+    pub fn serverCertificateVerifyDigestSha384(t: *Transcript, out: *[Sha384.digest_length]u8) void {
+        var h = Sha384.init(.{});
+        h.update(&certificate_verify_pad);
+        h.update("TLS 1.3, server CertificateVerify\x00");
+        h.update(t.peek());
+        h.final(out);
+    }
+
+    pub fn clientCertificateVerifyDigestSha384(t: *Transcript, out: *[Sha384.digest_length]u8) void {
+        var h = Sha384.init(.{});
+        h.update(&certificate_verify_pad);
+        h.update("TLS 1.3, client CertificateVerify\x00");
+        h.update(t.peek());
+        h.final(out);
+    }
+
     pub fn serverFinishedTls13(t: *Transcript) []const u8 {
         return switch (t.tag) {
             inline else => |h| @field(t, @tagName(h)).serverFinishedTls13(),
