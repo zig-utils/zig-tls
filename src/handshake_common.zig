@@ -516,7 +516,7 @@ pub const CertificateParser = struct {
 
     /// Parsed leaf public keys (avoid re-parsing SEC1/DER on CertificateVerify).
     ecdsa_p256_pk: ?EcdsaP256Sha256.PublicKey = null,
-    ecdsa_p256_mul_pc: ?[9]ecdsa_p256.P256 = null,
+    ecdsa_p256_mul_pc: ?[9]@import("crypto/p256.zig").AffineCoordinates = null,
     ecdsa_p384_pk: ?EcdsaP384Sha384.PublicKey = null,
     ed25519_pk: ?crypto.sign.Ed25519.PublicKey = null,
     rsa_pk: ?rsa.PublicKey = null,
@@ -710,7 +710,7 @@ pub const CertificateParser = struct {
             .X9_62_id_ecPublicKey => |curve| switch (curve) {
                 .X9_62_prime256v1 => {
                     h.ecdsa_p256_pk = try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
-                    h.ecdsa_p256_mul_pc = try ecdsa_p256.P256.precomputeMulPublic(h.ecdsa_p256_pk.?.p);
+                    h.ecdsa_p256_mul_pc = try ecdsa_p256.P256.precomputeMulPublicAffine(h.ecdsa_p256_pk.?.p);
                 },
                 .secp384r1 => h.ecdsa_p384_pk = try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key),
                 else => {},

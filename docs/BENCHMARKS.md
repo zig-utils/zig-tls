@@ -101,17 +101,18 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   routes through nistz `mulBase`.
 - **ECDSA pubkey precompute:** leaf P-256 public keys cache a width-8 mul table in
   `CertificateParser` so repeated `CertificateVerify` skips `precompute(p, 8)`.
-- **ECDSA scalar invert (verify):** variable-time Fermat `invertVarTime` uses hw
-  `ordMul`/`ordSqr` instead of fiat divstep on the verify-only path.
+- **ECDSA scalar invert (verify):** Brian Smith 292-step addition chain in
+  `p256/scalar_invert_chain.zig` replaces generic Fermat `pow` on the verify path.
 - **CertificateVerify sign path:** TLS 1.3 ECDSA signing uses incremental
   `serverCertificateVerifyDigest` and `signatureToDerTls` (fixed 72-byte layout).
 - **ECDSA verify nistz split:** `mulDoubleBasePublic` uses `nistz mulBase` + cached
-  `pcMul` + one add when nistz is enabled; `affineCoordinatesVarTime` avoids CT field invert.
+  affine `pcMulAffineVarTime` + one add when nistz is enabled; `affineCoordinatesVarTime`
+  avoids CT field invert on the result x-coordinate.
 - **TLS 1.3 GCM nonce cache:** `CachedAesGcm` reuses the counter=1 tag mask and counter=2
   CTR ivec per record nonce (bench transfer path uses a fixed nonce).
-- **Bedrock coord add/sub** (`p256_coord.zig`): BoringSSL no longer ships nistz
-  `point_add_affine` asm (Bedrock C in current tree); `mulBase` stays on Algorithm 5 `addMixed`.
-  (OpenSSL/BoringSSL nistz formulas need coord add/sub, not fiat Montgomery add/sub).
+- **Bedrock coord add/sub** (`p256_coord.zig`): `addMixedAffine` uses Jacobian math and is
+  **not** equivalent to projective Algorithm 5 `addMixed` on this stack; `addMixedVarTime` is
+  retained for a future full Jacobian point port. `mulBase` stays on Algorithm 5 `addMixed`.
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.
 - **nistz base-point table:** Gueron–Krasnov 37×64 affine precompute (`p256/nistz_table.zig`)

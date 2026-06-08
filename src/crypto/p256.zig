@@ -392,6 +392,24 @@ pub const P256 = struct {
         return q;
     }
 
+    fn pcMulAffineVarTime(pc: *const [9]AffineCoordinates, s: [32]u8) IdentityElementError!P256 {
+        const e = slide(s);
+        var q = P256.identityElement;
+        var pos = e.len - 1;
+        while (true) : (pos -= 1) {
+            const slot = e[pos];
+            if (slot > 0) {
+                q = q.addMixed(pc[@as(usize, @intCast(slot))]);
+            } else if (slot < 0) {
+                q = q.subMixed(pc[@as(usize, @intCast(-slot))]);
+            }
+            if (pos == 0) break;
+            q = q.dbl().dbl().dbl().dbl();
+        }
+        try q.rejectIdentity();
+        return q;
+    }
+
     fn pcMul16(pc: *const [16]P256, s: [32]u8, comptime vartime: bool) IdentityElementError!P256 {
         var q = P256.identityElement;
         var pos: usize = 252;
@@ -446,6 +464,14 @@ pub const P256 = struct {
         return precompute(p, 8);
     }
 
+    /// Width-8 affine table for verify (`addMixedVarTime` in the mul loop).
+    pub fn precomputeMulPublicAffine(p: P256) IdentityElementError![9]AffineCoordinates {
+        const pc = try precomputeMulPublic(p);
+        var out: [9]AffineCoordinates = undefined;
+        for (&pc, &out) |*pt, *aff| aff.* = pt.affineCoordinatesVarTime();
+        return out;
+    }
+
     /// Multiply an elliptic curve point by a *PUBLIC* scalar *IN VARIABLE TIME*
     /// This can be used for signature verification.
     pub fn mulPublic(p: P256, s_: [32]u8, endian: std.builtin.Endian) IdentityElementError!P256 {
@@ -459,12 +485,6 @@ pub const P256 = struct {
         return pcMul(&pc, s, true);
     }
 
-    /// `mulPublic` using a precomputed width-8 table (verify path).
-    pub fn mulPublicCached(s_: [32]u8, endian: std.builtin.Endian, pc: *const [9]P256) IdentityElementError!P256 {
-        const s = if (endian == .little) s_ else Fe.orderSwap(s_);
-        return pcMul(pc, s, true);
-    }
-
     /// Double-base multiplication of public parameters - Compute (p1*s1)+(p2*s2) *IN VARIABLE TIME*
     /// This can be used for signature verification.
     pub fn mulDoubleBasePublic(
@@ -473,19 +493,20 @@ pub const P256 = struct {
         p2: P256,
         s2_: [32]u8,
         endian: std.builtin.Endian,
-        pc2_cached: ?*const [9]P256,
+        pc2_affine_cached: ?*const [9]AffineCoordinates,
     ) IdentityElementError!P256 {
         const s1 = if (endian == .little) s1_ else Fe.orderSwap(s1_);
         const s2 = if (endian == .little) s2_ else Fe.orderSwap(s2_);
         if (p1.is_base and nistz_base.enabled) {
             const term1 = try nistz_base.mulBase(s1);
-            const term2 = if (pc2_cached) |pc|
-                try pcMul(pc, s2, true)
+            const term2 = if (pc2_affine_cached) |pc|
+                try pcMulAffineVarTime(pc, s2)
             else blk: {
                 try p2.rejectIdentity();
-                var pc2_array: [9]P256 = undefined;
-                pc2_array = precompute(p2, 8);
-                break :blk try pcMul(&pc2_array, s2, true);
+                const pc2_jac = precompute(p2, 8);
+                var aff: [9]AffineCoordinates = undefined;
+                for (&pc2_jac, &aff) |*pt, *a| a.* = pt.affineCoordinatesVarTime();
+                break :blk try pcMulAffineVarTime(&aff, s2);
             };
             const sum = term1.add(term2);
             try sum.rejectIdentity();
@@ -493,15 +514,20 @@ pub const P256 = struct {
         }
         try p1.rejectIdentity();
         var pc1_array: [9]P256 = undefined;
-        const pc1 = if (p1.is_base) basePointPc[0..9] else pc: {
+        const pc1: []const P256 = if (p1.is_base) basePointPc[0..9] else pc: {
             pc1_array = precompute(p1, 8);
             break :pc &pc1_array;
         };
         try p2.rejectIdentity();
-        var pc2_array: [9]P256 = undefined;
-        const pc2: []const P256 = if (pc2_cached) |pc| pc else if (p2.is_base) basePointPc[0..9] else pc: {
-            pc2_array = precompute(p2, 8);
-            break :pc &pc2_array;
+        var pc2_affine_array: [9]AffineCoordinates = undefined;
+        const pc2_affine: []const AffineCoordinates = if (pc2_affine_cached) |pc| pc else if (p2.is_base) blk: {
+            const pc2 = precompute(p2, 8);
+            for (&pc2, &pc2_affine_array) |*pt, *a| a.* = pt.affineCoordinatesVarTime();
+            break :blk &pc2_affine_array;
+        } else pc: {
+            const pc2 = precompute(p2, 8);
+            for (&pc2, &pc2_affine_array) |*pt, *a| a.* = pt.affineCoordinatesVarTime();
+            break :pc &pc2_affine_array;
         };
         const e1 = slide(s1);
         const e2 = slide(s2);
@@ -516,9 +542,9 @@ pub const P256 = struct {
             }
             const slot2 = e2[pos];
             if (slot2 > 0) {
-                q = q.add(pc2[@as(usize, @intCast(slot2))]);
+                q = q.addMixed(pc2_affine[@as(usize, @intCast(slot2))]);
             } else if (slot2 < 0) {
-                q = q.sub(pc2[@as(usize, @intCast(-slot2))]);
+                q = q.subMixed(pc2_affine[@as(usize, @intCast(-slot2))]);
             }
             if (pos == 0) break;
             q = q.dbl().dbl().dbl().dbl();
@@ -545,3 +571,6 @@ pub const AffineCoordinates = struct {
         p.y.cMov(a.y, c);
     }
 };
+
+// Bedrock Jacobian addMixedAffine is not equivalent to projective Algorithm 5 addMixed;
+// addMixedVarTime remains available for a future Jacobian point stack port.

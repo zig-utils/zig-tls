@@ -244,7 +244,7 @@ pub fn Field(comptime params: FieldParams) type {
             return fe;
         }
 
-        /// Variable-time inverse for verification (Fermat).
+        /// Variable-time inverse for verification (Fermat; scalar field uses addition chain in scalar.zig).
         pub fn invertVarTime(a: Fe) Fe {
             return a.pow(u256, field_order - 2);
         }
