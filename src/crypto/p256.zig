@@ -3,6 +3,8 @@ const crypto = std.crypto;
 const mem = std.mem;
 const meta = std.meta;
 
+const nistz_base = @import("p256_nistz.zig");
+
 const EncodingError = crypto.errors.EncodingError;
 const IdentityElementError = crypto.errors.IdentityElementError;
 const NonCanonicalError = crypto.errors.NonCanonicalError;
@@ -402,6 +404,7 @@ pub const P256 = struct {
     pub fn mul(p: P256, s_: [32]u8, endian: std.builtin.Endian) IdentityElementError!P256 {
         const s = if (endian == .little) s_ else Fe.orderSwap(s_);
         if (p.is_base) {
+            if (nistz_base.enabled) return nistz_base.mulBase(s);
             return pcMul16(&basePointPc, s, false);
         }
         try p.rejectIdentity();
