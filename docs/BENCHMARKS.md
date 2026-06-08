@@ -23,13 +23,13 @@ cmake --build /tmp/boringssl/build -j
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Handshake TLS 1.3 (minimal ECDHE) | **~8300 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6000 /s** | ~6500 /s | **~0.92–1.00×** |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3000 /s** | — | — |
-| Transfer send AES-128-GCM (16 KiB) | **~8800 MB/s** | ~8800 MB/s | **~1.00×** |
-| Transfer recv AES-128-GCM (16 KiB) | **~8100 MB/s** | ~8300 MB/s | ~0.98× |
-| Transfer send AES-256-GCM (16 KiB) | ~7700 MB/s | ~8000 MB/s | ~0.97× |
-| Transfer recv AES-256-GCM (16 KiB) | ~7700 MB/s | ~7550 MB/s | **~1.02×** |
+| Handshake TLS 1.3 (minimal ECDHE) | **~7800 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6045 /s** | ~6090 /s | **~0.99×** |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~2860 /s** | — | — |
+| Transfer send AES-128-GCM (16 KiB) | **~8080 MB/s** | ~6770 MB/s | **~1.19×** |
+| Transfer recv AES-128-GCM (16 KiB) | **~7630 MB/s** | ~7540 MB/s | **~1.01×** |
+| Transfer send AES-256-GCM (16 KiB) | **~7400 MB/s** | ~7050 MB/s | **~1.05×** |
+| Transfer recv AES-256-GCM (16 KiB) | **~7190 MB/s** | ~5850 MB/s | **~1.23×** |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
@@ -83,6 +83,10 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   bytes instead of the TLS message buffer.
 - **Client handshake reuse:** `nonblock.Client.reset()` preserves cached leaf cert
   public keys and hostname verification across repeated handshakes with the same server.
+- **Trusted leaf skip-parse:** on reset, when the server sends the same trusted-anchor
+  cert, skip DER parsing and chain verification entirely.
+- **Bedrock coord add/sub** (`p256_coord.zig`): foundation for future nistz point-add
+  (OpenSSL/BoringSSL nistz formulas need coord add/sub, not fiat Montgomery add/sub).
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.
 - **nistz base-point table:** Gueron–Krasnov 37×64 affine precompute (`p256/nistz_table.zig`)

@@ -493,6 +493,8 @@ pub const CertificateParser = struct {
     cached_leaf_hash: u64 = 0,
     cached_host_ok: bool = false,
     cached_leaf_ready: bool = false,
+    cached_not_before: u64 = 0,
+    cached_not_after: u64 = 0,
 
     pub fn skipCertificate(d: *record.Decoder, tls_version: proto.Version) !void {
         if (tls_version == .tls_1_3) {
@@ -530,6 +532,20 @@ pub const CertificateParser = struct {
                 continue;
 
             const trusted_index = if (!h.skip_verify) findTrustedCertDer(h.root_ca, crt) else null;
+            const leaf_hash = std.hash.Wyhash.hash(0, crt);
+            const reuse_leaf = h.cached_leaf_ready and leaf_hash == h.cached_leaf_hash;
+
+            if (last_cert == null and reuse_leaf and trusted_index != null) {
+                if (!h.skip_verify) {
+                    if (h.now_sec != 0 and h.now_sec < h.cached_not_before)
+                        return error.CertificateNotYetValid;
+                    if (h.now_sec != 0 and h.now_sec > h.cached_not_after)
+                        return error.CertificateExpired;
+                    trust_chain_established = true;
+                }
+                continue;
+            }
+
             const subject = try parseCertificateSubject(h.root_ca, crt, trusted_index);
             if (last_cert) |pc| {
                 if (pc.verify(subject, h.now_sec)) {
@@ -542,8 +558,6 @@ pub const CertificateParser = struct {
                     else => return err,
                 }
             } else { // first certificate
-                const leaf_hash = std.hash.Wyhash.hash(0, crt);
-                const reuse_leaf = h.cached_leaf_ready and leaf_hash == h.cached_leaf_hash;
                 if (!h.skip_verify and h.host.len > 0) {
                     if (!(h.cached_host_ok and leaf_hash == h.cached_leaf_hash)) {
                         try subject.verifyHostName(h.host);
@@ -555,6 +569,8 @@ pub const CertificateParser = struct {
                     h.pub_key_algo = subject.pub_key_algo;
                     try h.cacheParsedPublicKey();
                     h.cached_leaf_hash = leaf_hash;
+                    h.cached_not_before = subject.validity.not_before;
+                    h.cached_not_after = subject.validity.not_after;
                     h.cached_leaf_ready = true;
                 }
                 last_cert = subject;

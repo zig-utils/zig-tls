@@ -1419,6 +1419,8 @@ pub const NonBlock = struct {
         inner.cert.cached_leaf_hash = cert_cache.cached_leaf_hash;
         inner.cert.cached_host_ok = cert_cache.cached_host_ok;
         inner.cert.cached_leaf_ready = cert_cache.cached_leaf_ready;
+        inner.cert.cached_not_before = cert_cache.cached_not_before;
+        inner.cert.cached_not_after = cert_cache.cached_not_after;
         if (cert_cache.cached_leaf_ready) {
             inner.cert.pub_key_algo = cert_cache.pub_key_algo;
             inner.cert.ecdsa_p256_pk = cert_cache.ecdsa_p256_pk;
