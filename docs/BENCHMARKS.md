@@ -1,6 +1,6 @@
 # TLS Benchmark Results
 
-Side-by-side comparison of zig-tls and BoringSSL using the in-memory harness in
+Side-by-side comparison of zig-tls and BoringSSL using the matched in-memory harness in
 `bench/`. Run locally:
 
 ```bash
@@ -16,14 +16,6 @@ cmake -S /tmp/boringssl -B /tmp/boringssl/build -DCMAKE_BUILD_TYPE=Release
 cmake --build /tmp/boringssl/build -j
 ```
 
-Optional pure-C BoringSSL baseline (`OPENSSL_NO_ASM=1`) for crypto-only comparisons:
-
-```bash
-cmake -S /tmp/boringssl -B /tmp/boringssl/build-noasm -DCMAKE_BUILD_TYPE=Release -DOPENSSL_NO_ASM=1
-cmake --build /tmp/boringssl/build-noasm -j
-BORINGSSL_BUILD=/tmp/boringssl/build-noasm ./bench/compare.sh
-```
-
 ## Latest run (2026-06-08, Apple M3 Pro)
 
 **zig-tls:** zig `0.17.0-dev`, `-Doptimize=ReleaseFast -Dcpu=native`  
@@ -31,57 +23,55 @@ BORINGSSL_BUILD=/tmp/boringssl/build-noasm ./bench/compare.sh
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Full handshake TLS 1.3 | **~8200 /s** | ~6700 /s | **~1.23×** |
-| Transfer TLS 1.3 send (16 KiB records) | ~2360 MB/s | **~3450 MB/s** | ~0.68× |
-| Transfer TLS 1.3 recv (16 KiB records) | ~2390 MB/s | **~3460 MB/s** | ~0.69× |
+| Handshake TLS 1.3 (minimal ECDHE) | **~7700 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | ~3600 /s | ~6500 /s | ~0.55× |
+| Transfer send AES-128-GCM (16 KiB) | **~8300 MB/s** | ~8100 MB/s | **~1.02×** |
+| Transfer recv AES-128-GCM (16 KiB) | **~8000 MB/s** | ~7800 MB/s | **~1.02×** |
+| Transfer send AES-256-GCM (16 KiB) | ~7400 MB/s | ~7600 MB/s | ~0.97× |
+| Transfer recv AES-256-GCM (16 KiB) | ~7150 MB/s | ~7350 MB/s | ~0.97× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
-### vs BoringSSL without assembly (reference)
+BoringSSL's TLS 1.3 server requires a certificate, so there is no BoringSSL minimal-handshake
+row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 
-With `BORINGSSL_BUILD=/tmp/boringssl/build-noasm`, zig-tls leads all categories
-(handshake ~3×, transfer ~8×) because zig uses ARM AES instructions while that
-build disables BoringSSL’s assembly crypto.
+### Summary
+
+| Category | Winner |
+|----------|--------|
+| Minimal handshake | **zig-tls** (zig-only row) |
+| Cert handshake | BoringSSL (P-256 ECDSA sign; see below) |
+| Transfer AES-128 | **zig-tls** (parity / slight lead) |
+| Transfer AES-256 | Parity (within ~3%) |
 
 ## Methodology
 
 Categories mirror [rustls perf](https://rustls.dev/perf/):
 
-1. **Full handshake** — TLS 1.3, X25519 only, in-memory I/O (no TCP).
-2. **Bulk transfer** — AES-128-GCM application data after handshake (send or recv direction).
+1. **Handshake** — TLS 1.3, X25519 only, in-memory non-blocking pump (no TCP).
+2. **Bulk transfer** — AES-128/256-GCM TLS 1.3 application records after handshake, one
+   direction per row (send = encrypt only, recv = decrypt only).
 
 ### zig-tls (`bench/main.zig`)
 
-- X25519-only, TLS 1.3-only, `AES_128_GCM_SHA256`, HelloRetryRequest disabled.
-- Optimized in-memory pump (`pumpHandshake`) instead of generic buffer churn.
+- X25519-only, TLS 1.3-only, HelloRetryRequest disabled.
+- Client uses `insecure_skip_verify = true` (matches BoringSSL `SSL_VERIFY_NONE`).
 - Transfer uses monomorphized `encryptApplication` + in-place `decryptRecordInPlace`.
-- Server runs with `auth = null` (no Certificate / CertificateVerify flights).
-- Client uses `insecure_skip_verify = true`.
 
 ### BoringSSL (`bench/boringssl_bench.cc`)
 
-- `BIO_new_bio_pair` + `SSL_do_handshake` pump (same process, no TCP).
-- Server uses BoringSSL’s ECDSA P-256 test certificate; client skips verification.
-- TLS 1.3 only (`TLS1_3_VERSION` min/max).
-
-Handshake numbers are closer to apples-to-apples after zig-tls bench tuning; BoringSSL
-still includes certificate messages. Transfer compares zig’s lean record API against
-BoringSSL’s `SSL_write` / `SSL_read` on top of heavily optimized assembly GCM.
+- `BIO_new_bio_pair` + `SSL_do_handshake` pump.
+- Same P-256 test certificate as zig (`bench/certs.zig`).
+- Transfer uses post-handshake traffic secrets → HKDF → `EVP_AEAD` on TLS 1.3 record layout.
 
 ## Performance work in this tree
 
-- **Handshake:** release log no-ops, lazy server `DhKeyPair` (reused in TLS 1.3
-  `serverFlight`, no duplicate keygen), skip TLS 1.3 RSA premaster generation, bench
-  pins X25519-only (avoids ML-KEM-768 keygen per handshake).
-- **Transfer:** cached AES-GCM key schedule + GHASH subkey (`aes_gcm_cached.zig`),
-  TLS 1.3-specialized GCM (`encryptTls13` / `decryptTls13`), cached GHASH state after
-  the fixed 5-byte AD block, incremental sequence nonce updates, `encryptApplication`
-  fast path (skip redundant header writes for repeated record sizes), in-place decrypt.
-- **Gap vs BoringSSL ASM:** remaining transfer deficit is mostly stitched AArch64
-  AES-GCM (CTR + GHASH interleaved in assembly). Pure-Zig record-layer tuning is
-  largely exhausted at ~0.68×; closing the gap needs platform GCM kernels.
-- **Bench:** `-Dcpu=native`, pinned cipher suite, dedicated pump loop, monomorphized
-  AES-128-GCM transfer path.
+- **Transfer:** stitched AES-GCM assembly (AArch64/x86_64, BoringSSL-derived).
+- **Handshake:** single-hash transcript updates after cipher suite selection; TLS 1.3 server
+  flight coalesced into one encrypted record; cached TLS 1.3 Certificate message in
+  `CertKeyPair`; direct `KeyPair.sign` / `signPrehashed` for CertificateVerify.
+- **Remaining cert gap:** portable Zig P-256 ECDSA vs BoringSSL assembly (`p256-armv8`).
+  Closing this requires vendored P-256 field arithmetic (next perf milestone).
 
 ## Regression tracking
 
