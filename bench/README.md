@@ -6,12 +6,14 @@ Run benchmarks:
 zig build bench -Doptimize=ReleaseFast
 ```
 
-Compare against BoringSSL (when `boringssl_bench` is installed):
+Compare against BoringSSL (builds `zig-out/bin/boringssl_bench` from `bench/boringssl_bench.cc`):
 
 ```bash
 chmod +x bench/compare.sh
 ./bench/compare.sh
 ```
+
+Recorded results: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 ## Methodology
 

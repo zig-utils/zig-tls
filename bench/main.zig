@@ -3,9 +3,36 @@ const std = @import("std");
 const Io = std.Io;
 const tls = @import("tls");
 
+pub const std_options: std.Options = .{
+    .log_level = if (builtin.mode == .Debug) .warn else .err,
+};
+
 const iterations: u32 = if (builtin.mode == .Debug) 100 else 10_000;
 const transfer_bytes: usize = 16 * 1024;
 const transfer_iterations: u32 = if (builtin.mode == .Debug) 50 else 5_000;
+
+const bench_groups = &[_]tls.config.NamedGroup{.x25519};
+
+const bench_cipher = &[_]tls.config.CipherSuite{.AES_128_GCM_SHA256};
+
+const bench_client_opt = tls.config.Client{
+    .host = "localhost",
+    .root_ca = .empty,
+    .insecure_skip_verify = true,
+    .cipher_suites = bench_cipher,
+    .named_groups = bench_groups,
+    .min_version = .tls_1_3,
+    .max_version = .tls_1_3,
+};
+
+const bench_server_opt = tls.config.Server{
+    .auth = null,
+    .cipher_suites = bench_cipher,
+    .named_groups = bench_groups,
+    .send_hello_retry_for_preferred_group = false,
+    .min_version = .tls_1_3,
+    .max_version = .tls_1_3,
+};
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [0x400]u8 = undefined;
@@ -26,26 +53,25 @@ fn benchTime(io: Io) i96 {
     return Io.Clock.awake.now(io).nanoseconds;
 }
 
-fn benchHandshake(io: Io, w: anytype, label: []const u8) !void {
-    var sc_buf: [tls.max_ciphertext_record_len]u8 = undefined;
+fn pumpHandshake(cli: *tls.nonblock.Client, srv: *tls.nonblock.Server) !void {
     var cs_buf: [tls.max_ciphertext_record_len]u8 = undefined;
+    var sc_buf: [tls.max_ciphertext_record_len]u8 = undefined;
 
+    _ = try cli.run(&.{}, &cs_buf);
+    _ = try srv.run(cs_buf[0..], &sc_buf);
+    while (!cli.done()) {
+        _ = try cli.run(sc_buf[0..], &cs_buf);
+        _ = try srv.run(cs_buf[0..], &sc_buf);
+    }
+}
+
+fn benchHandshake(io: Io, w: anytype, label: []const u8) !void {
     const start = benchTime(io);
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
-        var cli = tls.nonblock.Client.init(.{
-            .root_ca = .empty,
-            .host = "localhost",
-            .insecure_skip_verify = true,
-        });
-        var srv = tls.nonblock.Server.init(.{ .auth = null });
-
-        _ = try cli.run(&sc_buf, &cs_buf);
-        _ = try srv.run(&cs_buf, &sc_buf);
-        while (!cli.done()) {
-            _ = try cli.run(&sc_buf, &cs_buf);
-            _ = try srv.run(&cs_buf, &sc_buf);
-        }
+        var cli = tls.nonblock.Client.init(bench_client_opt);
+        var srv = tls.nonblock.Server.init(bench_server_opt);
+        try pumpHandshake(&cli, &srv);
     }
     const elapsed_ns = benchTime(io) - start;
     const handshakes_per_sec = @as(f64, @floatFromInt(iterations)) /
@@ -53,70 +79,45 @@ fn benchHandshake(io: Io, w: anytype, label: []const u8) !void {
     try w.print("{s:<50} {d:>10.2} /s\n", .{ label, handshakes_per_sec });
 }
 
-fn benchTransfer(io: Io, w: anytype, label: []const u8) !void {
-    const cli_cipher, const srv_cipher = try setupConnection();
-    var cli = tls.nonblock.Connection.init(cli_cipher);
-    var srv = tls.nonblock.Connection.init(srv_cipher);
-
+fn benchTransferDir(
+    io: Io,
+    w: anytype,
+    label: []const u8,
+    sender: *tls.Cipher,
+    receiver: *tls.Cipher,
+) !void {
     var send_buf: [tls.max_ciphertext_record_len]u8 = undefined;
-    var recv_buf: [tls.max_ciphertext_record_len]u8 = undefined;
-    var payload_buf: [transfer_bytes]u8 = undefined;
-    @memset(&payload_buf, 'x');
-    const payload = payload_buf[0..];
+    const payload = send_buf[tls.record_header_len .. tls.record_header_len + transfer_bytes];
+    @memset(payload, 'x');
 
     const start = benchTime(io);
     var i: u32 = 0;
+    // Monomorphized AES-128-GCM path (bench pins this cipher suite).
+    const sender_aes = &sender.AES_128_GCM_SHA256;
+    const receiver_aes = &receiver.AES_128_GCM_SHA256;
     while (i < transfer_iterations) : (i += 1) {
-        const e = try cli.encrypt(payload, &send_buf);
-        const d = try srv.decrypt(e.ciphertext, &recv_buf);
-        _ = d;
+        const enc_len = try sender_aes.encryptApplication(send_buf[0..], transfer_bytes);
+        _ = try receiver_aes.decryptRecordInPlace(send_buf[0..enc_len]);
     }
     const elapsed_ns = benchTime(io) - start;
     const total_mb = @as(f64, @floatFromInt(transfer_bytes * transfer_iterations)) / (1024 * 1024);
     const mb_per_sec = total_mb / (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s)));
     try w.print("{s:<50} {d:>10.2} MB/s\n", .{ label, mb_per_sec });
+}
+
+fn benchTransfer(io: Io, w: anytype, label: []const u8) !void {
+    var cli_cipher, var srv_cipher = try setupConnection();
+    try benchTransferDir(io, w, label, &cli_cipher, &srv_cipher);
 }
 
 fn benchTransferRecv(io: Io, w: anytype, label: []const u8) !void {
-    const cli_cipher, const srv_cipher = try setupConnection();
-    var cli = tls.nonblock.Connection.init(cli_cipher);
-    var srv = tls.nonblock.Connection.init(srv_cipher);
-
-    var send_buf: [tls.max_ciphertext_record_len]u8 = undefined;
-    var recv_buf: [tls.max_ciphertext_record_len]u8 = undefined;
-    var payload_buf: [transfer_bytes]u8 = undefined;
-    @memset(&payload_buf, 'x');
-    const payload = payload_buf[0..];
-
-    const start = benchTime(io);
-    var i: u32 = 0;
-    while (i < transfer_iterations) : (i += 1) {
-        const e = try srv.encrypt(payload, &send_buf);
-        const d = try cli.decrypt(e.ciphertext, &recv_buf);
-        _ = d;
-    }
-    const elapsed_ns = benchTime(io) - start;
-    const total_mb = @as(f64, @floatFromInt(transfer_bytes * transfer_iterations)) / (1024 * 1024);
-    const mb_per_sec = total_mb / (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s)));
-    try w.print("{s:<50} {d:>10.2} MB/s\n", .{ label, mb_per_sec });
+    var cli_cipher, var srv_cipher = try setupConnection();
+    try benchTransferDir(io, w, label, &srv_cipher, &cli_cipher);
 }
 
 fn setupConnection() !struct { tls.Cipher, tls.Cipher } {
-    var sc_buf: [tls.max_ciphertext_record_len]u8 = undefined;
-    var cs_buf: [tls.max_ciphertext_record_len]u8 = undefined;
-
-    var cli = tls.nonblock.Client.init(.{
-        .root_ca = .empty,
-        .host = "localhost",
-        .insecure_skip_verify = true,
-    });
-    var srv = tls.nonblock.Server.init(.{ .auth = null });
-
-    _ = try cli.run(&sc_buf, &cs_buf);
-    _ = try srv.run(&cs_buf, &sc_buf);
-    while (!cli.done()) {
-        _ = try cli.run(&sc_buf, &cs_buf);
-        _ = try srv.run(&cs_buf, &sc_buf);
-    }
+    var cli = tls.nonblock.Client.init(bench_client_opt);
+    var srv = tls.nonblock.Server.init(bench_server_opt);
+    try pumpHandshake(&cli, &srv);
     return .{ cli.cipher().?, srv.cipher().? };
 }
