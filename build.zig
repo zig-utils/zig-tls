@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addHwGcmAsm(b, tls_module, target);
+    addHwCryptoAsm(b, tls_module, target);
 
     // Unit tests
     const lib_mod = b.createModule(.{
@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addHwGcmAsm(b, lib_mod, target);
+    addHwCryptoAsm(b, lib_mod, target);
     const unit_tests = b.addTest(.{
         .root_module = lib_mod,
     });
@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-fn addHwGcmAsm(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+fn addHwCryptoAsm(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     const arch = target.result.cpu.arch;
     const os = target.result.os.tag;
 
@@ -88,6 +88,7 @@ fn addHwGcmAsm(b: *std.Build, module: *std.Build.Module, target: std.Build.Resol
             "aesv8-gcm-armv8",
             "ghashv8-armv8",
             "aesv8-armv8",
+            "p256-armv8-asm",
         }) |base| {
             const path = b.fmt("src/crypto/aarch64/{s}-{s}.S", .{ base, suffix });
             module.addAssemblyFile(b.path(path));
@@ -101,9 +102,16 @@ fn addHwGcmAsm(b: *std.Build, module: *std.Build.Module, target: std.Build.Resol
         inline for (.{
             "aes-gcm-avx2-x86_64",
             "aesni-x86_64",
+            "p256-x86_64-asm",
         }) |base| {
             const path = b.fmt("src/crypto/x86_64/{s}-{s}.S", .{ base, suffix });
             module.addAssemblyFile(b.path(path));
+        }
+        inline for (.{
+            "fiat_p256_adx_mul",
+            "fiat_p256_adx_sqr",
+        }) |base| {
+            module.addAssemblyFile(b.path(b.fmt("src/crypto/x86_64/{s}.S", .{base})));
         }
     }
 }
