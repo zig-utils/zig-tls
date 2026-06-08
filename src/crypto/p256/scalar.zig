@@ -159,6 +159,11 @@ pub const Scalar = struct {
         return Scalar{ .fe = n.fe.invert() };
     }
 
+    /// Variable-time inverse for verification (Fermat; uses hw ord mul/sqr when available).
+    pub fn invertVarTime(n: Scalar) Scalar {
+        return Scalar{ .fe = n.fe.pow(u256, field_order - 2) };
+    }
+
     /// Return true if n is a quadratic residue mod L.
     pub fn isSquare(n: Scalar) bool {
         return n.fe.isSquare();
@@ -230,3 +235,11 @@ const ScalarDouble = struct {
         return Scalar{ .fe = fe };
     }
 };
+
+test "invertVarTime matches invert" {
+    var s: [48]u8 = undefined;
+    @memset(&s, 0);
+    s[0] = 0x42;
+    const n = Scalar.fromBytes48(s, .little);
+    try std.testing.expect(Scalar.invertVarTime(n).equivalent(Scalar.invert(n)));
+}

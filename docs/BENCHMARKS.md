@@ -25,7 +25,7 @@ cmake --build /tmp/boringssl/build -j
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8530 /s** | — | — |
 | Handshake TLS 1.3 (ECDHE + cert) | **~6550 /s** | ~6970 /s | ~0.94× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3840 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3890 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8740 MB/s** | ~8780 MB/s | ~0.99× |
 | Transfer recv AES-128-GCM (16 KiB) | **~8430 MB/s** | ~8390 MB/s | **~1.01×** |
 | Transfer send AES-256-GCM (16 KiB) | **~7960 MB/s** | ~8070 MB/s | ~0.99× |
@@ -101,6 +101,8 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   routes through nistz `mulBase`.
 - **ECDSA pubkey precompute:** leaf P-256 public keys cache a width-8 mul table in
   `CertificateParser` so repeated `CertificateVerify` skips `precompute(p, 8)`.
+- **ECDSA scalar invert (verify):** variable-time Fermat `invertVarTime` uses hw
+  `ordMul`/`ordSqr` instead of fiat divstep on the verify-only path.
 - **TLS 1.3 GCM nonce cache:** `CachedAesGcm` reuses the counter=1 tag mask and counter=2
   CTR ivec per record nonce (bench transfer path uses a fixed nonce).
 - **Bedrock coord add/sub** (`p256_coord.zig`): BoringSSL no longer ships nistz
