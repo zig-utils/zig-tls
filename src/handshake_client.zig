@@ -1408,6 +1408,30 @@ pub const NonBlock = struct {
         };
     }
 
+    /// Start a new handshake reusing `opt` and any cached certificate state.
+    pub fn reset(self: *Self) void {
+        const cert_cache = self.inner.cert;
+        var inner = Handshake{
+            .input = undefined,
+            .output = undefined,
+        };
+        inner.initKeys(self.opt) catch unreachable;
+        inner.cert.cached_leaf_hash = cert_cache.cached_leaf_hash;
+        inner.cert.cached_host_ok = cert_cache.cached_host_ok;
+        inner.cert.cached_leaf_ready = cert_cache.cached_leaf_ready;
+        if (cert_cache.cached_leaf_ready) {
+            inner.cert.pub_key_algo = cert_cache.pub_key_algo;
+            inner.cert.ecdsa_p256_pk = cert_cache.ecdsa_p256_pk;
+            inner.cert.ecdsa_p384_pk = cert_cache.ecdsa_p384_pk;
+            inner.cert.ed25519_pk = cert_cache.ed25519_pk;
+            inner.cert.rsa_pk = cert_cache.rsa_pk;
+            @memcpy(inner.cert.pub_key_buf[0..cert_cache.pub_key.len], cert_cache.pub_key);
+            inner.cert.pub_key = inner.cert.pub_key_buf[0..cert_cache.pub_key.len];
+        }
+        self.inner = inner;
+        self.state = .init;
+    }
+
     fn send(self: *Self) !void {
         switch (self.state) {
             .init => {

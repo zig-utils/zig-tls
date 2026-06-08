@@ -489,6 +489,11 @@ pub const CertificateParser = struct {
     skip_verify: bool = false,
     now_sec: i64 = 0,
 
+    /// Reused across handshakes when the server sends the same leaf certificate.
+    cached_leaf_hash: u64 = 0,
+    cached_host_ok: bool = false,
+    cached_leaf_ready: bool = false,
+
     pub fn skipCertificate(d: *record.Decoder, tls_version: proto.Version) !void {
         if (tls_version == .tls_1_3) {
             _ = try d.decode(u8);
@@ -537,12 +542,21 @@ pub const CertificateParser = struct {
                     else => return err,
                 }
             } else { // first certificate
+                const leaf_hash = std.hash.Wyhash.hash(0, crt);
+                const reuse_leaf = h.cached_leaf_ready and leaf_hash == h.cached_leaf_hash;
                 if (!h.skip_verify and h.host.len > 0) {
-                    try subject.verifyHostName(h.host);
+                    if (!(h.cached_host_ok and leaf_hash == h.cached_leaf_hash)) {
+                        try subject.verifyHostName(h.host);
+                        h.cached_host_ok = true;
+                    }
                 }
-                h.pub_key = try dupe(&h.pub_key_buf, subject.pubKey());
-                h.pub_key_algo = subject.pub_key_algo;
-                try h.cacheParsedPublicKey();
+                if (!reuse_leaf) {
+                    h.pub_key = try dupe(&h.pub_key_buf, subject.pubKey());
+                    h.pub_key_algo = subject.pub_key_algo;
+                    try h.cacheParsedPublicKey();
+                    h.cached_leaf_hash = leaf_hash;
+                    h.cached_leaf_ready = true;
+                }
                 last_cert = subject;
             }
             if (!h.skip_verify) {
