@@ -48,7 +48,7 @@ zig build -Dfuzz=true fuzz   # fuzz binaries in zig-out/bin/
 - HelloRetryRequest: implemented for preferred-group mismatch; stateless cookie is connection-scoped (16-byte random)
 - 0-RTT early data: client send and server decrypt with PSK binder verification; disabled by default (`Server.max_early_data_size = 0`); set `> 0` to accept early data on PSK resume
 - FFDHE2048: implemented (RFC 7919); x448 and secp521r1 are rejected if listed in `named_groups` (awaiting `std.crypto` support)
-- Record crypto: optional BoringSSL-derived AES-GCM assembly on AArch64/x86_64 (`src/crypto/*/NOTICE`)
+- Record crypto: optional BoringSSL-derived AES-GCM and P-256 Montgomery assembly on AArch64/x86_64 (`src/crypto/*/NOTICE`)
 
 ## Bun Integration Surface
 

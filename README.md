@@ -72,4 +72,4 @@ See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 MIT - Based on <https://github.com/ianic/tls.zig>
 
-Record-layer AES-GCM assembly is derived from [BoringSSL](https://github.com/google/boringssl) (Apache 2.0); see `src/crypto/*/NOTICE`.
+Record-layer AES-GCM and P-256 field arithmetic assembly is derived from [BoringSSL](https://github.com/google/boringssl) (Apache 2.0); see `src/crypto/*/NOTICE`.

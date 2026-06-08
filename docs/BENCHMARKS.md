@@ -23,12 +23,12 @@ cmake --build /tmp/boringssl/build -j
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Handshake TLS 1.3 (minimal ECDHE) | **~7700 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | ~3600 /s | ~6500 /s | ~0.55× |
-| Transfer send AES-128-GCM (16 KiB) | **~8300 MB/s** | ~8100 MB/s | **~1.02×** |
-| Transfer recv AES-128-GCM (16 KiB) | **~8000 MB/s** | ~7800 MB/s | **~1.02×** |
-| Transfer send AES-256-GCM (16 KiB) | ~7400 MB/s | ~7600 MB/s | ~0.97× |
-| Transfer recv AES-256-GCM (16 KiB) | ~7150 MB/s | ~7350 MB/s | ~0.97× |
+| Handshake TLS 1.3 (minimal ECDHE) | **~8500 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | ~4700 /s | ~6900 /s | ~0.68× |
+| Transfer send AES-128-GCM (16 KiB) | **~8800 MB/s** | ~8800 MB/s | **~1.00×** |
+| Transfer recv AES-128-GCM (16 KiB) | **~8100 MB/s** | ~8300 MB/s | ~0.98× |
+| Transfer send AES-256-GCM (16 KiB) | ~7700 MB/s | ~8000 MB/s | ~0.97× |
+| Transfer recv AES-256-GCM (16 KiB) | ~7700 MB/s | ~7550 MB/s | **~1.02×** |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
@@ -40,9 +40,9 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | BoringSSL (P-256 ECDSA sign; see below) |
-| Transfer AES-128 | **zig-tls** (parity / slight lead) |
-| Transfer AES-256 | Parity (within ~3%) |
+| Cert handshake | BoringSSL (~1.5×; gap narrowed with P-256 field asm) |
+| Transfer AES-128 | Parity |
+| Transfer AES-256 | Parity |
 
 ## Methodology
 
@@ -70,8 +70,14 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **Handshake:** single-hash transcript updates after cipher suite selection; TLS 1.3 server
   flight coalesced into one encrypted record; cached TLS 1.3 Certificate message in
   `CertKeyPair`; direct `KeyPair.sign` / `signPrehashed` for CertificateVerify.
-- **Remaining cert gap:** portable Zig P-256 ECDSA vs BoringSSL assembly (`p256-armv8`).
-  Closing this requires vendored P-256 field arithmetic (next perf milestone).
+- **P-256 ECDSA:** BoringSSL `ecp_nistz256` field/scalar Montgomery kernels on AArch64;
+  fiat ADX + ord kernels on x86_64 (`src/crypto/p256_*`, `hw_p256.zig`).
+- **Client cert verify:** parsed leaf public keys cached in `CertificateParser` (ECDSA,
+  Ed25519, RSA) to avoid re-parsing on `CertificateVerify`.
+- **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
+  `-Dcpu=native`; no extra assembly vendored.
+- **Remaining cert gap:** BoringSSL still uses wider P-256 precomputed tables for signing;
+  further gains need nistz point multiplication tables or similar.
 
 ## Regression tracking
 
