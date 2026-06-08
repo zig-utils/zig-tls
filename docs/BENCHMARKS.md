@@ -25,7 +25,7 @@ cmake --build /tmp/boringssl/build -j
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~7540 /s** | — | — |
 | Handshake TLS 1.3 (ECDHE + cert) | **~6155 /s** | ~6410 /s | **~0.96×** |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~2950 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3000 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8490 MB/s** | ~8360 MB/s | **~1.02×** |
 | Transfer recv AES-128-GCM (16 KiB) | **~8050 MB/s** | ~8160 MB/s | ~0.99× |
 | Transfer send AES-256-GCM (16 KiB) | **~7750 MB/s** | ~7680 MB/s | **~1.01×** |
@@ -87,7 +87,12 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   cert, skip DER parsing and chain verification entirely.
 - **Trusted leaf prewarm:** single-cert `root_ca` bundles are parsed once at client
   init (pubkey, hostname, validity) so the first handshake skips TLS cert DER work too.
+- **Trusted root index:** all `root_ca` entries are hash+length indexed at client init
+  for O(n) trusted-anchor lookup without repeated `memcmp` over the bundle.
+- **P-256 CertificateVerify DER:** `signatureFromDerTls` fast-paths the usual 70–72 byte
+  ECDSA SEQUENCE before falling back to the generic DER reader (~3000/s verify handshake).
 - **Bedrock coord add/sub** (`p256_coord.zig`): foundation for future nistz point-add
+  (`addMixedVarTime` wrapper present; not wired into `mulBase` until equivalence tests pass).
   (OpenSSL/BoringSSL nistz formulas need coord add/sub, not fiat Montgomery add/sub).
 - **SHA-256:** Zig `std.crypto` already uses AArch64 SHA2 / x86 SHA-NI+AVX2 when
   `-Dcpu=native`; no extra assembly vendored.

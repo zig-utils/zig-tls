@@ -1423,7 +1423,7 @@ pub const NonBlock = struct {
         inner.cert.cached_not_before = cert_cache.cached_not_before;
         inner.cert.cached_not_after = cert_cache.cached_not_after;
         inner.cert.cached_leaf_der_len = cert_cache.cached_leaf_der_len;
-        inner.cert.prewarmed_trusted_index = cert_cache.prewarmed_trusted_index;
+        inner.cert.prewarmed_trusted = cert_cache.prewarmed_trusted;
         if (cert_cache.cached_leaf_ready) {
             inner.cert.pub_key_algo = cert_cache.pub_key_algo;
             inner.cert.ecdsa_p256_pk = cert_cache.ecdsa_p256_pk;

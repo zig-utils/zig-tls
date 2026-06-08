@@ -12,7 +12,8 @@ const rsa = @import("rsa/rsa.zig");
 const proto = @import("protocol.zig");
 
 const X25519 = crypto.dh.X25519;
-const EcdsaP256Sha256 = @import("crypto/ecdsa_p256.zig").EcdsaP256Sha256;
+const ecdsa_p256 = @import("crypto/ecdsa_p256.zig");
+const EcdsaP256Sha256 = ecdsa_p256.EcdsaP256Sha256;
 const EcdsaP384Sha384 = crypto.sign.ecdsa.EcdsaP384Sha384;
 const MLKem768 = crypto.kem.ml_kem.MLKem768;
 
@@ -446,13 +447,16 @@ fn bundleContainsCertDer(bundle: Certificate.Bundle, bytes_index: u32, der: []co
     return mem.eql(u8, der, bundle_der);
 }
 
+const prewarm_trusted_max = 32;
+
 fn findTrustedCertDer(h: *const CertificateParser, der: []const u8) ?u32 {
-    if (h.prewarmed_trusted_index) |idx| {
-        if (der.len == h.cached_leaf_der_len and
-            std.hash.Wyhash.hash(0, der) == h.cached_leaf_hash and
-            bundleContainsCertDer(h.root_ca, idx, der))
+    const leaf_hash = std.hash.Wyhash.hash(0, der);
+    const der_len: u32 = @intCast(der.len);
+    for (h.prewarmed_trusted.entries[0..h.prewarmed_trusted.count]) |entry| {
+        if (entry.der_len == der_len and entry.hash == leaf_hash and
+            bundleContainsCertDer(h.root_ca, entry.bytes_index, der))
         {
-            return idx;
+            return entry.bytes_index;
         }
     }
     var it = h.root_ca.map.iterator();
@@ -518,13 +522,43 @@ pub const CertificateParser = struct {
     cached_not_before: u64 = 0,
     cached_not_after: u64 = 0,
     cached_leaf_der_len: u32 = 0,
-    prewarmed_trusted_index: ?u32 = null,
+    prewarmed_trusted: struct {
+        count: u8 = 0,
+        entries: [prewarm_trusted_max]struct {
+            hash: u64,
+            der_len: u32,
+            bytes_index: u32,
+        } = undefined,
+    } = .{},
 
-    /// Parse and cache a single-cert root_ca bundle before the first handshake.
+    fn indexPrewarmedTrusted(h: *CertificateParser, bytes_index: u32, der: []const u8) void {
+        const der_len: u32 = @intCast(der.len);
+        const hash = std.hash.Wyhash.hash(0, der);
+        for (h.prewarmed_trusted.entries[0..h.prewarmed_trusted.count]) |entry| {
+            if (entry.bytes_index == bytes_index and entry.der_len == der_len and entry.hash == hash) return;
+        }
+        if (h.prewarmed_trusted.count >= prewarm_trusted_max) return;
+        h.prewarmed_trusted.entries[h.prewarmed_trusted.count] = .{
+            .hash = hash,
+            .der_len = der_len,
+            .bytes_index = bytes_index,
+        };
+        h.prewarmed_trusted.count += 1;
+    }
+
+    /// Index trusted root_ca certificates and pre-parse a single-cert leaf when possible.
     pub fn prewarmTrustedLeaf(h: *CertificateParser) !void {
-        if (h.skip_verify or h.cached_leaf_ready) return;
-        if (h.root_ca.map.count() != 1) return;
+        if (h.skip_verify) return;
+
         var it = h.root_ca.map.iterator();
+        while (it.next()) |entry| {
+            const bytes_index = entry.value_ptr.*;
+            const der = bundleDerSpan(h.root_ca, bytes_index) orelse continue;
+            h.indexPrewarmedTrusted(bytes_index, der);
+        }
+
+        if (h.cached_leaf_ready or h.root_ca.map.count() != 1) return;
+        it = h.root_ca.map.iterator();
         const entry = it.next() orelse return;
         const bytes_index = entry.value_ptr.*;
         const der = bundleDerSpan(h.root_ca, bytes_index) orelse return;
@@ -541,7 +575,6 @@ pub const CertificateParser = struct {
         h.cached_leaf_der_len = @intCast(der.len);
         h.cached_not_before = subject.validity.not_before;
         h.cached_not_after = subject.validity.not_after;
-        h.prewarmed_trusted_index = bytes_index;
         h.cached_leaf_ready = true;
     }
 
@@ -620,7 +653,9 @@ pub const CertificateParser = struct {
                     h.cached_leaf_der_len = @intCast(crt.len);
                     h.cached_not_before = subject.validity.not_before;
                     h.cached_not_after = subject.validity.not_after;
-                    if (trusted_index) |idx| h.prewarmed_trusted_index = idx;
+                    if (trusted_index) |idx| {
+                        h.indexPrewarmedTrusted(idx, crt);
+                    }
                     h.cached_leaf_ready = true;
                 }
                 last_cert = subject;
@@ -669,7 +704,7 @@ pub const CertificateParser = struct {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
                 if (h.pub_key_algo.X9_62_id_ecPublicKey != .X9_62_prime256v1) return error.TlsUnknownSignatureScheme;
                 const key = h.ecdsa_p256_pk orelse try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
-                const sig = try EcdsaP256Sha256.Signature.fromDer(h.signature);
+                const sig = try ecdsa_p256.signatureFromDerTls(h.signature);
                 var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
                 crypto.hash.sha2.Sha256.hash(verify_bytes, &digest, .{});
                 try sig.verifyPrehashed(digest, key);
