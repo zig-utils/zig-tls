@@ -18,6 +18,8 @@ jobs:
           version: '0.17.0-dev.56+a8226cd53'
       - run: zig build bench -Doptimize=ReleaseFast -Dcpu=native
       - run: zig build test
+      - name: Interop tests (in-process)
+        run: zig build test 2>&1 | grep -E 'interop:|smoke fuzz' || true
 
   bench-macos:
     name: Benchmark baseline macOS (non-gating)

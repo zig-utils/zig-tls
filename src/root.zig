@@ -131,6 +131,12 @@ pub const aes_gcm_cached = @import("aes_gcm_cached.zig");
 pub const tls_hkdf = @import("tls_hkdf.zig");
 pub const x25519_base = @import("crypto/x25519_base.zig");
 
+/// libFuzzer / audit hooks for untrusted handshake bytes (no panics).
+pub const fuzz = struct {
+    pub const parseClientHello = @import("handshake_server.zig").Handshake.fuzzReadClientHello;
+    pub const parseServerHello = @import("handshake_client.zig").Handshake.fuzzParseServerHello;
+};
+
 fn pumpNonblockHandshake(cli: *nonblock.Client, srv: *nonblock.Server) !void {
     var cs_buf: [max_ciphertext_record_len]u8 = undefined;
     var sc_buf: [max_ciphertext_record_len]u8 = undefined;
@@ -219,6 +225,65 @@ test "0-RTT early data server decrypt" {
     }
     try testing.expect(cli.done());
     try testing.expect(srv.done());
+}
+
+test "interop: TLS 1.3 cert handshake with OCSP staple" {
+
+    const testing = @import("std").testing;
+    const allocator = testing.allocator;
+    const ocsp = [_]u8{ 0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00 };
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIBfDCCASOgAwIBAgIUQLqOnCo7H/bJUF1Szr+llCjaUDQwCgYIKoZIzj0EAwIw
+        \\FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDYwODE2NDI0NVoXDTM2MDYwNTE2
+        \\NDI0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+        \\AQcDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4G20Q
+        \\q0dJ3jaRBz8MMglQClooPnY3Z3iNJKNTMFEwHQYDVR0OBBYEFKCBVZdchts7bXZB
+        \\ZWuL8eNAdz/YMB8GA1UdIwQYMBaAFKCBVZdchts7bXZBZWuL8eNAdz/YMA8GA1Ud
+        \\EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgcbi5sqviAW6/cB5IceGx2aBG
+        \\mURelDq3gDVCXdGXhuoCIHgffOqfX89M1r8Hax8HY7MACM+wnevA7UDIurNdCUUU
+        \\-----END CERTIFICATE-----
+    ;
+    const key_pem =
+        \\-----BEGIN EC PRIVATE KEY-----
+        \\MHcCAQEEIKpmzT0Wdz4OucLI2ZaHsBjBsSLW4rqsmjMoDhmegFKdoAoGCCqGSM49
+        \\AwEHoUQDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4
+        \\G20Qq0dJ3jaRBz8MMglQClooPnY3Z3iNJA==
+        \\-----END EC PRIVATE KEY-----
+    ;
+    var cert_key = try config.CertKeyPair.fromPem(allocator, cert_pem, key_pem);
+    defer cert_key.deinit(allocator);
+
+    const groups = &[_]config.NamedGroup{.x25519};
+    const ciphers = &[_]config.CipherSuite{.AES_128_GCM_SHA256};
+    const server_opt = config.Server{
+        .auth = &cert_key,
+        .cipher_suites = ciphers,
+        .named_groups = groups,
+        .ocsp_response = &ocsp,
+        .send_hello_retry_for_preferred_group = false,
+        .min_version = .tls_1_3,
+        .max_version = .tls_1_3,
+    };
+    const client_opt = config.Client{
+        .host = "localhost",
+        .root_ca = .empty,
+        .insecure_skip_verify = true,
+        .cipher_suites = ciphers,
+        .named_groups = groups,
+        .request_ocsp = true,
+        .server_ecdsa_p256_w7_table = cert_key.ecdsa_p256_w7_table,
+        .table_allocator = allocator,
+        .min_version = .tls_1_3,
+        .max_version = .tls_1_3,
+    };
+
+    var cli = nonblock.Client.init(client_opt);
+    var srv = nonblock.Server.init(server_opt);
+    try pumpNonblockHandshake(&cli, &srv);
+    try testing.expect(cli.done());
+    try testing.expect(srv.done());
+    try testing.expect(cli.cipher() != null);
 }
 
 test "nonblock handshake and connection" {

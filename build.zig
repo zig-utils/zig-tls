@@ -91,15 +91,15 @@ fn addBedrockCMulBase(b: *std.Build, compile: *std.Build.Step.Compile, enabled: 
     compile.root_module.addIncludePath(b.path("src/crypto/c/bedrock"));
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/crypto/c/bedrock/bedrock_mul_base.c"),
-        .flags = &.{"-std=c11", "-O3"},
+        .flags = &.{ "-std=c11", "-O3" },
     });
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/crypto/c/bedrock/bedrock_double_base_verify.c"),
-        .flags = &.{"-std=c11", "-O3"},
+        .flags = &.{ "-std=c11", "-O3" },
     });
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/crypto/c/bedrock/bedrock_point_mul_public.c"),
-        .flags = &.{"-std=c11", "-O3"},
+        .flags = &.{ "-std=c11", "-O3" },
     });
 }
 

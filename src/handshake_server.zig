@@ -75,9 +75,8 @@ pub const Options = struct {
     min_version: proto.Version = .tls_1_2,
     max_version: proto.Version = .tls_1_3,
 
-    /// OCSP stapling response bytes (reserved; not yet sent in Certificate
-    /// extensions — clients may request stapling via `status_request` but the
-    /// server does not attach a response today).
+    /// Stapled OCSP response for the leaf certificate (TLS 1.3 `status_request`
+    /// extension on the first Certificate entry). Max `max_ocsp_staple_len` bytes.
     ocsp_response: ?[]const u8 = null,
 
     /// Send HelloRetryRequest when the client key_share does not match the preferred group.
@@ -784,32 +783,33 @@ pub const Handshake = struct {
             var ee_hw = record.Writer.init(&ee_msg);
             try ee_hw.handshakeRecord(.encrypted_extensions, ee_w.buffered());
             try appendMsg(&flight_buf, &flight_len, ee_hw.buffered());
+            h.transcript.update(ee_hw.buffered());
 
             if (opt.client_auth) |_| {
                 var cr_msg: [512]u8 = undefined;
                 var cr_hw = record.Writer.init(&cr_msg);
                 try makeCertificateRequest(&cr_hw);
                 try appendMsg(&flight_buf, &flight_len, cr_hw.buffered());
+                h.transcript.update(cr_hw.buffered());
             }
             if (opt.auth) |auth| {
                 const cb = CertificateBuilder{
                     .cert_key_pair = auth,
                     .transcript = &h.transcript,
                     .side = .server,
+                    .ocsp_response = opt.ocsp_response,
                 };
                 var cert_msg: [1024]u8 = undefined;
                 var cert_hw = record.Writer.init(&cert_msg);
                 try cb.makeCertificate(&cert_hw);
                 try appendMsg(&flight_buf, &flight_len, cert_hw.buffered());
-                h.transcript.update(flight_buf[0..flight_len]);
+                h.transcript.update(cert_hw.buffered());
 
                 var cv_msg: [512]u8 = undefined;
                 var cv_hw = record.Writer.init(&cv_msg);
                 try cb.makeCertificateVerify(&cv_hw);
                 try appendMsg(&flight_buf, &flight_len, cv_hw.buffered());
                 h.transcript.update(cv_hw.buffered());
-            } else if (flight_len > 0) {
-                h.transcript.update(flight_buf[0..flight_len]);
             }
 
             var fin_msg: [64]u8 = undefined;
@@ -1264,6 +1264,18 @@ pub const Handshake = struct {
         }
 
         log.info("readClientHello complete: tls_version={}, cipher_suite={x}, named_group={x}", .{ h.tls_version, @intFromEnum(h.cipher_suite), @intFromEnum(h.named_group) });
+    }
+
+    /// Fuzz/audit entry: parse untrusted ClientHello bytes without panicking.
+    pub fn fuzzReadClientHello(payload: []const u8) void {
+        var reader: Io.Reader = .fixed(payload);
+        var h: Handshake = .{ .input = &reader, .output = undefined };
+        h.signature_scheme = .ecdsa_secp256r1_sha256;
+        h.readClientHello(.{ .auth = null, .cipher_suites = cipher_suites.secure }, &[_]proto.NamedGroup{
+            .x25519,
+            .secp256r1,
+            .secp384r1,
+        }) catch {};
     }
 };
 

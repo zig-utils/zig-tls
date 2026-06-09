@@ -301,6 +301,7 @@ pub const Handshake = struct {
             .host = opt.host,
             .root_ca = opt.root_ca,
             .skip_verify = opt.insecure_skip_verify,
+            .request_ocsp = opt.request_ocsp,
             .table_allocator = opt.table_allocator,
             .borrowed_ecdsa_p256_w7_table = opt.server_ecdsa_p256_w7_table,
         };
@@ -879,6 +880,7 @@ pub const Handshake = struct {
                             },
                             .certificate_verify => {
                                 try h.cert.parseCertificateVerify(&d);
+                                if (h.cert.pub_key.len == 0) return error.TlsDecryptError;
                                 try h.cert.verifySignatureTranscript(&h.transcript, .server);
                                 handshake_states = &.{.finished};
                             },
@@ -1116,6 +1118,16 @@ pub const Handshake = struct {
             if (opt.auth) |a|
                 d.client_signature_scheme = a.key.signature_scheme;
         }
+    }
+
+    /// Fuzz/audit entry: parse untrusted ServerHello bytes without panicking.
+    pub fn fuzzParseServerHello(payload: []const u8) void {
+        var reader: Io.Reader = .fixed(payload);
+        var d = Record.decoder(&reader) catch return;
+        _ = d.decode(proto.Handshake) catch return;
+        const length = d.decode(u24) catch return;
+        var h: Handshake = undefined;
+        h.parseServerHello(&d, length) catch {};
     }
 };
 
@@ -1498,7 +1510,7 @@ pub const NonBlock = struct {
             inner.cert.ecdsa_p384_pk = cert_cache.ecdsa_p384_pk;
             inner.cert.ed25519_pk = cert_cache.ed25519_pk;
             inner.cert.rsa_pk = cert_cache.rsa_pk;
-            @memcpy(inner.cert.pub_key_buf[0..cert_cache.pub_key.len], cert_cache.pub_key);
+            for (cert_cache.pub_key, 0..) |byte, i| inner.cert.pub_key_buf[i] = byte;
             inner.cert.pub_key = inner.cert.pub_key_buf[0..cert_cache.pub_key.len];
         }
         self.inner = inner;

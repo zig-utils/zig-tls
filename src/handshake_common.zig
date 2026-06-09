@@ -18,6 +18,7 @@ const nistz_p256 = @import("crypto/p256_nistz.zig");
 const EcdsaP256Sha256 = ecdsa_p256.EcdsaP256Sha256;
 const EcdsaP384Sha384 = crypto.sign.ecdsa.EcdsaP384Sha384;
 const MLKem768 = crypto.kem.ml_kem.MLKem768;
+const ocsp_mod = @import("ocsp.zig");
 
 pub const supported_signature_algorithms = &[_]proto.SignatureScheme{
     .ecdsa_secp256r1_sha256,
@@ -327,6 +328,21 @@ pub const cert = struct {
     }
 };
 
+/// Max stapled OCSP response size attached to the leaf Certificate entry.
+pub const max_ocsp_staple_len = 8192;
+
+/// TLS 1.3 per-certificate extensions block (u16 list length + entries).
+fn tls13CertExtensions(ocsp: ?[]const u8, ext_buf: []u8) ![]const u8 {
+    const resp = ocsp orelse return &[_]u8{ 0, 0 };
+    if (resp.len == 0 or resp.len > max_ocsp_staple_len) return error.TlsIllegalParameter;
+    var w = record.Writer.init(ext_buf);
+    try w.int(u16, 4 + resp.len);
+    try w.enumValue(proto.Extension.status_request);
+    try w.int(u16, @as(u16, @intCast(resp.len)));
+    try w.slice(resp);
+    return w.buffered();
+}
+
 fn signEcdsaP256Tls(
     key_pair: EcdsaP256Sha256.KeyPair,
     digest: [crypto.hash.sha2.Sha256.digest_length]u8,
@@ -343,38 +359,69 @@ pub const CertificateBuilder = struct {
     transcript: *Transcript,
     tls_version: proto.Version = .tls_1_3,
     side: proto.Side = .client,
+    /// Stapled OCSP response for the leaf certificate (TLS 1.3 status_request ext).
+    ocsp_response: ?[]const u8 = null,
 
     pub fn makeCertificate(h: CertificateBuilder, w: *record.Writer) !void {
-        if (h.tls_version == .tls_1_3 and h.cert_key_pair.tls13_certificate_msg.len != 0) {
+        if (h.tls_version == .tls_1_3 and h.cert_key_pair.tls13_certificate_msg.len != 0 and
+            h.ocsp_response == null)
+        {
             try w.slice(h.cert_key_pair.tls13_certificate_msg);
             return;
         }
         const certs = h.cert_key_pair.bundle.bytes.items;
         const certs_count = h.cert_key_pair.bundle.map.size;
 
+        var ext_buf: [max_ocsp_staple_len + 8]u8 = undefined;
+        const leaf_extensions = if (h.tls_version == .tls_1_3)
+            try tls13CertExtensions(h.ocsp_response, &ext_buf)
+        else
+            &[_]u8{};
+        const empty_tls13_ext: []const u8 = &[_]u8{ 0, 0 };
+
         // Differences between tls 1.3 and 1.2
         // TLS 1.3 has request context in header and extensions for each certificate.
-        // Here we use empty length for each field.
         // TLS 1.2 don't have these two fields.
-        const request_context, const extensions = if (h.tls_version == .tls_1_3)
-            .{ &[_]u8{0}, &[_]u8{ 0, 0 } }
-        else
-            .{ &[_]u8{}, &[_]u8{} };
-        const certs_len = certs.len + (3 + extensions.len) * certs_count;
+        const request_context: []const u8 = if (h.tls_version == .tls_1_3) &[_]u8{0} else &.{};
+        var certs_len: usize = 0;
+        var index: u32 = 0;
+        var first = true;
+        while (index < certs.len) {
+            const e = try Certificate.der.Element.parse(certs, index);
+            const crt = certs[index..e.slice.end];
+            const extensions: []const u8 = if (h.tls_version == .tls_1_3) blk: {
+                if (first) {
+                    first = false;
+                    break :blk leaf_extensions;
+                }
+                break :blk empty_tls13_ext;
+            } else &[_]u8{};
+            certs_len += 3 + crt.len + extensions.len;
+            index = e.slice.end;
+        }
+        _ = certs_count;
 
         // Write handshake header
         try w.handshakeRecordHeader(.certificate, certs_len + request_context.len + 3);
         try w.slice(request_context);
-        try w.int(u24, certs_len);
+        try w.int(u24, @as(u24, @intCast(certs_len)));
 
         // Write each certificate
-        var index: u32 = 0;
+        index = 0;
+        first = true;
         while (index < certs.len) {
             const e = try Certificate.der.Element.parse(certs, index);
             const crt = certs[index..e.slice.end];
-            try w.int(u24, crt.len); // certificate length
-            try w.slice(crt); // certificate
-            try w.slice(extensions); // certificate extensions
+            const extensions: []const u8 = if (h.tls_version == .tls_1_3) blk: {
+                if (first) {
+                    first = false;
+                    break :blk leaf_extensions;
+                }
+                break :blk empty_tls13_ext;
+            } else &[_]u8{};
+            try w.int(u24, @as(u24, @intCast(crt.len)));
+            try w.slice(crt);
+            try w.slice(extensions);
             index = e.slice.end;
         }
     }
@@ -605,6 +652,7 @@ pub const CertificateParser = struct {
     root_ca: Certificate.Bundle,
     host: []const u8,
     skip_verify: bool = false,
+    request_ocsp: bool = false,
     now_sec: i64 = 0,
 
     /// Reused across handshakes when the server sends the same leaf certificate.
@@ -763,6 +811,12 @@ pub const CertificateParser = struct {
         return true;
     }
 
+    fn validateLeafOcspStaple(h: *const CertificateParser, staple: ?[]const u8, leaf_der: []const u8) !void {
+        if (!h.request_ocsp or h.skip_verify) return;
+        const resp = staple orelse return error.TlsBadCertificateStatusResponse;
+        ocsp_mod.validateStaple(resp, leaf_der, h.now_sec) catch return error.TlsBadCertificateStatusResponse;
+    }
+
     pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
         if (h.now_sec == 0) {
             var ts: std.c.timespec = undefined;
@@ -784,9 +838,13 @@ pub const CertificateParser = struct {
         while (d.idx - start_idx < certs_len) {
             const crt_len = try d.decode(u24);
             const crt = try d.slice(crt_len);
+            var leaf_ocsp_staple: ?[]const u8 = null;
             if (tls_version == .tls_1_3) {
-                // certificate extensions present in tls 1.3
-                try d.skip(try d.decode(u16));
+                const ext_len = try d.decode(u16);
+                const ext_bytes = try d.slice(ext_len);
+                if (last_cert == null) {
+                    leaf_ocsp_staple = ocsp_mod.parseTls13StatusRequestExtension(ext_bytes);
+                }
             }
             if (trust_chain_established)
                 continue;
@@ -800,6 +858,7 @@ pub const CertificateParser = struct {
             if (last_cert == null and reuse_leaf and trusted_index != null) {
                 if (!h.skip_verify) {
                     try checkCertValidityCached(h);
+                    try h.validateLeafOcspStaple(leaf_ocsp_staple, crt);
                     trust_chain_established = true;
                 }
                 continue;
@@ -823,6 +882,7 @@ pub const CertificateParser = struct {
                         h.cached_host_ok = true;
                     }
                 }
+                try h.validateLeafOcspStaple(leaf_ocsp_staple, crt);
                 if (!reuse_leaf) {
                     h.pub_key = try dupe(&h.pub_key_buf, subject.pubKey());
                     h.pub_key_algo = subject.pub_key_algo;
@@ -1211,6 +1271,52 @@ test "CertKeyPair.fromPem loads P-256 credentials" {
     try testing.expect(pair.tls13_certificate_msg.len > 0);
     try testing.expect(pair.ecdsa_key_pair != null);
     try testing.expectEqual(.ecdsa_secp256r1_sha256, pair.key.signature_scheme);
+}
+
+test "TLS 1.3 certificate staples OCSP on leaf entry" {
+    const ocsp = [_]u8{ 0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00 };
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIBfDCCASOgAwIBAgIUQLqOnCo7H/bJUF1Szr+llCjaUDQwCgYIKoZIzj0EAwIw
+        \\FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDYwODE2NDI0NVoXDTM2MDYwNTE2
+        \\NDI0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+        \\AQcDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4G20Q
+        \\q0dJ3jaRBz8MMglQClooPnY3Z3iNJKNTMFEwHQYDVR0OBBYEFKCBVZdchts7bXZB
+        \\ZWuL8eNAdz/YMB8GA1UdIwQYMBaAFKCBVZdchts7bXZBZWuL8eNAdz/YMA8GA1Ud
+        \\EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgcbi5sqviAW6/cB5IceGx2aBG
+        \\mURelDq3gDVCXdGXhuoCIHgffOqfX89M1r8Hax8HY7MACM+wnevA7UDIurNdCUUU
+        \\-----END CERTIFICATE-----
+    ;
+    const key_pem =
+        \\-----BEGIN EC PRIVATE KEY-----
+        \\MHcCAQEEIKpmzT0Wdz4OucLI2ZaHsBjBsSLW4rqsmjMoDhmegFKdoAoGCCqGSM49
+        \\AwEHoUQDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4
+        \\G20Qq0dJ3jaRBz8MMglQClooPnY3Z3iNJA==
+        \\-----END EC PRIVATE KEY-----
+    ;
+    var pair = try CertKeyPair.fromPem(testing.allocator, cert_pem, key_pem);
+    defer pair.deinit(testing.allocator);
+
+    var transcript: Transcript = .{};
+    var buf: [4096]u8 = undefined;
+    var w = record.Writer.init(&buf);
+    const cb = CertificateBuilder{
+        .cert_key_pair = &pair,
+        .transcript = &transcript,
+        .side = .server,
+        .ocsp_response = &ocsp,
+    };
+    try cb.makeCertificate(&w);
+    const msg = w.buffered();
+    try testing.expect(msg.len > ocsp.len + 16);
+    // Leaf extensions: list_len(2) + status_request(2) + data_len(2) + ocsp
+    const ext_list_len: u16 = @intCast(4 + ocsp.len);
+    var needle: [max_ocsp_staple_len + 8]u8 = undefined;
+    std.mem.writeInt(u16, needle[0..2], ext_list_len, .big);
+    std.mem.writeInt(u16, needle[2..4], @intFromEnum(proto.Extension.status_request), .big);
+    std.mem.writeInt(u16, needle[4..6], @intCast(ocsp.len), .big);
+    @memcpy(needle[6..][0..ocsp.len], &ocsp);
+    try testing.expect(std.mem.indexOf(u8, msg, needle[0 .. 6 + ocsp.len]) != null);
 }
 
 test "DhKeyPair.x25519" {
