@@ -1242,7 +1242,10 @@ pub const Handshake = struct {
                 transcript_updated = true;
             }
         }
-        if (!transcript_updated) h.transcript.update(d.payload);
+        if (!transcript_updated) {
+            h.transcript.use(h.cipher_suite.hash());
+            h.transcript.update(d.payload);
+        }
 
         log.info("readClientHello complete: tls_version={}, cipher_suite={x}, named_group={x}", .{ h.tls_version, @intFromEnum(h.cipher_suite), @intFromEnum(h.named_group) });
     }

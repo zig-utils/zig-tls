@@ -275,6 +275,9 @@ pub const Handshake = struct {
 
     fn initKeys(h: *Self, opt: Options) !void {
         const tls_versions = try CipherSuite.versions(opt.cipher_suites);
+        if (tls_versions == .tls_1_3) {
+            if (CipherSuite.uniformHashTag(opt.cipher_suites)) |tag| h.transcript.use(tag);
+        }
         rng.fill(&h.client_random);
         if (tls_versions != .tls_1_3) {
             var rsa_buf: [46]u8 = undefined;
@@ -804,28 +807,22 @@ pub const Handshake = struct {
     /// for TLS 1.3: change cipher spec, eventual certificate request,
     /// certificate, certificate verify and handshake finished messages.
     fn readEncryptedServerFlight1(h: *Self, is_session_resumption: bool) !void {
-        // buffer for decrypted handshake records
-        var cleartext_buffer: [max_cleartext_len]u8 = undefined;
-        // cleartext writer
-        var cw = Io.Writer.fixed(&cleartext_buffer);
-        // valid handshake types for the next record
         var handshake_states: []const proto.Handshake = &.{.encrypted_extensions};
 
         outer: while (true) {
-            // wrapped record decoder
             const rec = try Record.read(h.input);
             if (rec.protocol_version != .tls_1_2) return error.TlsBadVersion;
             h.max_server_record_len = @max(h.max_server_record_len, rec.buffer.len);
             switch (rec.content_type) {
                 .change_cipher_spec => {},
                 .application_data => {
-                    // `decrypt` will return TlsCipherNoSpaceLeft
-                    // unusedCapacitySlice is too small to hold cleartext
-                    const content_type, const cleartext = try h.cipher.decrypt(cw.unusedCapacitySlice(), rec);
-                    cw.advance(cleartext.len);
-                    h.max_server_cleartext_len = @max(h.max_server_cleartext_len, cw.end);
+                    if (rec.buffer.len > h.decrypt_buf.len) return error.TlsCipherNoSpaceLeft;
+                    @memcpy(h.decrypt_buf[0..rec.buffer.len], rec.buffer);
+                    const cleartext = try h.cipher.decryptRecordInPlace(h.decrypt_buf[0..rec.buffer.len]);
+                    h.max_server_cleartext_len = @max(h.max_server_cleartext_len, cleartext.len);
 
-                    var d = record.Decoder.init(content_type, cw.buffered());
+                    var cleartext_off: usize = 0;
+                    var d = record.Decoder.init(.handshake, cleartext[cleartext_off..]);
                     try d.expectContentType(.handshake);
                     while (!d.eof()) {
                         const handshake_type = try d.decode(proto.Handshake);
@@ -835,12 +832,10 @@ pub const Handshake = struct {
                             return error.TlsUnsupportedFragmentedHandshakeMessage;
                         if (length > d.rest().len)
                             continue :outer; // handshake fragmented into multiple records
-                        // jump to outer must be before this defer to presrve buffers
                         defer {
-                            // 'd.idx' data is consumed
-                            h.transcript.update(d.payload[0..d.idx]);
-                            _ = cw.consume(d.idx);
-                            d = record.Decoder.init(content_type, cw.buffered());
+                            h.transcript.update(cleartext[cleartext_off .. cleartext_off + d.idx]);
+                            cleartext_off += d.idx;
+                            d = record.Decoder.init(.handshake, cleartext[cleartext_off..]);
                         }
                         // check valid handshake types in this state
                         brk: {
