@@ -111,8 +111,18 @@ pub fn verifyPrehashed(
     const s_inv = s.invertVarTime();
     const v1 = z.mul(s_inv).toBytes(.little);
     const v2 = r.mul(s_inv).toBytes(.little);
-    const sum = try P256.mulDoubleBaseVerify(P256.basePoint, v1, public_key.p, v2, .little, mul_pc, mul_w7_table);
-    const vr = feBytesToScalar(sum.xCoordVarTime().toBytes(.big));
+    const x_fe = if (nistz_base.enabled and mul_w7_table != null) blk: {
+        break :blk nistz_base.mulDoubleBaseVarTimeXFromTables(
+            v1,
+            v2,
+            nistz_base.basePrecomputedTable(),
+            mul_w7_table.?,
+        );
+    } else blk: {
+        const sum = try P256.mulDoubleBaseVerify(P256.basePoint, v1, public_key.p, v2, .little, mul_pc, mul_w7_table);
+        break :blk sum.xCoordVarTime();
+    };
+    const vr = feBytesToScalar(x_fe.toBytes(.big));
     if (!r.equivalent(vr)) return error.SignatureVerificationFailed;
 }
 

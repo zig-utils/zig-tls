@@ -57,15 +57,74 @@ fn selectAffine(row: table.Row, idx: usize, row_i: usize) table.AffineMont {
 
 fn jacobianToAffineMont(j: Jacobian) table.AffineMont {
     const Z = Fe{ .limbs = j[2] };
-    const z_inv2 = field_inv_sqr.invSqrMont(Z);
-    const z_inv4 = z_inv2.sq();
+    const z_inv = Z.invertVarTime();
+    return jacobianToAffineMontWithZInv(j, z_inv);
+}
+
+fn jacobianToAffineMontWithZInv(j: Jacobian, z_inv: Fe) table.AffineMont {
+    var z_inv2: coord.Coord = undefined;
+    coord.sqr(&z_inv2, z_inv.limbs);
+    var z_inv3: coord.Coord = undefined;
+    coord.mul(&z_inv3, z_inv2, z_inv.limbs);
     var x_out: coord.Coord = undefined;
-    var yz: coord.Coord = undefined;
     var y_out: coord.Coord = undefined;
-    coord.mul(&x_out, j[0], z_inv2.limbs);
-    coord.mul(&yz, j[1], j[2]);
-    coord.mul(&y_out, yz, z_inv4.limbs);
+    coord.mul(&x_out, j[0], z_inv2);
+    coord.mul(&y_out, j[1], z_inv3);
     return .{ .x = x_out, .y = y_out };
+}
+
+/// Affine x from Jacobian (ECDSA verify: skip full normalization).
+fn jacobianXCoord(j: Jacobian) Fe {
+    const Z = Fe{ .limbs = j[2] };
+    const z_inv2 = field_inv_sqr.invSqrMont(Z);
+    return (Fe{ .limbs = j[0] }).mul(z_inv2);
+}
+
+fn batchInvertFe(limit: usize, out: []Fe, inputs: []const Fe) void {
+    std.debug.assert(limit > 0 and limit <= 64);
+    var acc: [64]Fe = undefined;
+    acc[0] = inputs[0];
+    var i: usize = 1;
+    while (i < limit) : (i += 1) {
+        acc[i] = acc[i - 1].mul(inputs[i]);
+    }
+    var inv = acc[limit - 1].invertVarTime();
+    i = limit;
+    while (i > 0) : (i -= 1) {
+        const idx = i - 1;
+        if (idx == 0) {
+            out[0] = inv;
+        } else {
+            out[idx] = inv.mul(acc[idx - 1]);
+        }
+        inv = inv.mul(inputs[idx]);
+    }
+}
+
+fn buildTableRow(row_base_j: Jacobian, limit: usize) table.Row {
+    const one_z = montgomeryOne();
+    const row_aff = jacobianToAffineMont(row_base_j);
+    const base_xy: [2]coord.Coord = .{ row_aff.x, row_aff.y };
+
+    var jacs: [64]Jacobian = undefined;
+    jacs[0] = .{ base_xy[0], base_xy[1], one_z };
+    var idx: usize = 1;
+    while (idx < limit) : (idx += 1) {
+        var out: Jacobian = undefined;
+        coord.addMixedAffineOrDouble(&out, jacs[idx - 1], base_xy);
+        jacs[idx] = out;
+    }
+
+    var z_fe: [64]Fe = undefined;
+    var z_inv: [64]Fe = undefined;
+    for (0..limit) |j| z_fe[j] = Fe{ .limbs = jacs[j][2] };
+    batchInvertFe(limit, z_inv[0..limit], z_fe[0..limit]);
+
+    var row: table.Row = undefined;
+    for (0..limit) |j| {
+        row[j] = jacobianToAffineMontWithZInv(jacs[j], z_inv[j]);
+    }
+    return row;
 }
 
 fn jacobianToP256(j: Jacobian) IdentityElementError!P256 {
@@ -213,29 +272,16 @@ fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
     return mulAffineTableVarTime(s, &table.ecp_nistz256_precomputed);
 }
 
-/// Build a Gueron–Krasnov 37×64 affine table using Bedrock Jacobian row math.
+/// Build a Gueron–Krasnov 37×64 affine table (batch Z⁻¹ per row when Bedrock enabled).
 pub fn buildPrecomputedTable(p: P256) TableRows {
     if (!use_bedrock_verify_accum) return buildPrecomputedTableProjective(p);
 
     var rows: TableRows = undefined;
     var row_j = p256ToJacobian(p);
-    const one_z = montgomeryOne();
 
     for (0..37) |row_i| {
         const limit: usize = if (row_i == 36) 16 else 64;
-        const row_aff = jacobianToAffineMont(row_j);
-        const base_xy: [2]coord.Coord = .{ row_aff.x, row_aff.y };
-        rows[row_i][0] = row_aff;
-
-        var acc: Jacobian = .{ base_xy[0], base_xy[1], one_z };
-        var idx: usize = 1;
-        while (idx < limit) : (idx += 1) {
-            var out: Jacobian = undefined;
-            coord.addMixedAffineOrDouble(&out, acc, base_xy);
-            acc = out;
-            rows[row_i][idx] = jacobianToAffineMont(acc);
-        }
-
+        rows[row_i] = buildTableRow(row_j, limit);
         if (row_i < 36) {
             for (0..7) |_| {
                 var out: Jacobian = undefined;
@@ -276,14 +322,24 @@ pub fn basePrecomputedTable() *const TableRows {
     return &table.ecp_nistz256_precomputed;
 }
 
-/// Unified w7 double-base mul (u1·G + u2·Q) for ECDSA verify.
-pub fn mulDoubleBaseVarTimeFromTables(
+fn mulDoubleBaseBedrockC(s1: [32]u8, s2: [32]u8, table2: *const TableRows) Jacobian {
+    const mul = @extern(
+        *const fn (out: *[3][4]u64, s1: *const [32]u8, s2: *const [32]u8, q_table: *const TableRows) callconv(.c) void,
+        .{ .name = "p256_bedrock_mul_double_base_jacobian" },
+    );
+    var j: [3][4]u64 = undefined;
+    mul(&j, &s1, &s2, table2);
+    return .{ j[0], j[1], j[2] };
+}
+
+fn mulDoubleBaseJacobianFromTables(
     s1: [32]u8,
     s2: [32]u8,
     table1: *const TableRows,
     table2: *const TableRows,
-) P256 {
-    if (!use_bedrock_verify_accum) return mulDoubleBaseProjectiveFromTables(s1, s2, table1, table2);
+) Jacobian {
+    if (!@inComptime() and bedrock_c.enabled)
+        return mulDoubleBaseBedrockC(s1, s2, table2);
 
     var ret_is_zero = true;
     var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
@@ -296,7 +352,34 @@ pub fn mulDoubleBaseVarTimeFromTables(
         accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table2[row_i], row_i, boothRecodeW7(loadWindow(s2, row_i)));
     }
 
+    return acc;
+}
+
+/// Unified w7 double-base mul (u1·G + u2·Q) for ECDSA verify.
+pub fn mulDoubleBaseVarTimeFromTables(
+    s1: [32]u8,
+    s2: [32]u8,
+    table1: *const TableRows,
+    table2: *const TableRows,
+) P256 {
+    if (!use_bedrock_verify_accum) return mulDoubleBaseProjectiveFromTables(s1, s2, table1, table2);
+    const acc = mulDoubleBaseJacobianFromTables(s1, s2, table1, table2);
     return jacobianToP256(acc) catch unreachable;
+}
+
+/// Double-base mul returning affine x only (ECDSA verify hot path).
+pub fn mulDoubleBaseVarTimeXFromTables(
+    s1: [32]u8,
+    s2: [32]u8,
+    table1: *const TableRows,
+    table2: *const TableRows,
+) Fe {
+    if (!use_bedrock_verify_accum) {
+        const p = mulDoubleBaseProjectiveFromTables(s1, s2, table1, table2);
+        return p.xCoordVarTime();
+    }
+    const acc = mulDoubleBaseJacobianFromTables(s1, s2, table1, table2);
+    return jacobianXCoord(acc);
 }
 
 fn mulDoubleBaseProjectiveFromTables(
@@ -431,6 +514,37 @@ test "mulDoubleBaseVarTimeFromTables matches split mul" {
     const unified = mulDoubleBaseVarTimeFromTables(s1, s2, basePrecomputedTable(), &q_pc);
     const split = mulBaseVarTime(s1).add(mulPublicVarTimeFromTable(s2, &q_pc));
     try std.testing.expect(unified.equivalent(split));
+}
+
+test "batch table row matches per-entry affine conversion" {
+    if (!use_bedrock_verify_accum) return error.SkipZigTest;
+    const row_j = p256ToJacobian(P256.basePoint);
+    const batch = buildTableRow(row_j, 16);
+    const one_z = montgomeryOne();
+    const row_aff = jacobianToAffineMont(row_j);
+    const base_xy: [2]coord.Coord = .{ row_aff.x, row_aff.y };
+    var acc: Jacobian = .{ base_xy[0], base_xy[1], one_z };
+    var idx: usize = 0;
+    while (idx < 16) : (idx += 1) {
+        const slow = jacobianToAffineMont(acc);
+        try std.testing.expectEqual(batch[idx].x, slow.x);
+        try std.testing.expectEqual(batch[idx].y, slow.y);
+        if (idx + 1 < 16) {
+            var out: Jacobian = undefined;
+            coord.addMixedAffineOrDouble(&out, acc, base_xy);
+            acc = out;
+        }
+    }
+}
+
+test "mulDoubleBaseVarTimeXFromTables matches full point" {
+    if (!enabled) return error.SkipZigTest;
+    const q_pc = buildPrecomputedTable(P256.basePoint);
+    const s1: [32]u8 = @splat(0x11);
+    const s2: [32]u8 = @splat(0x22);
+    const x = mulDoubleBaseVarTimeXFromTables(s1, s2, basePrecomputedTable(), &q_pc);
+    const p = mulDoubleBaseVarTimeFromTables(s1, s2, basePrecomputedTable(), &q_pc);
+    try std.testing.expect(x.equivalent(p.xCoordVarTime()));
 }
 
 test "W7Table heap roundtrip" {
