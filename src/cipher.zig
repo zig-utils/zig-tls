@@ -617,7 +617,8 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
 
             const iv = if (comptime has_cached_gcm) self.encrypt_npub else ivWithSeq(nonce_len, self.encrypt_iv, self.encrypt_seq);
             if (comptime has_cached_gcm) {
-                self.gcm_enc.encrypt(ciphertext, auth_tag, ciphertext, header, iv);
+                const ad: *const [record.header_len]u8 = buf[0..record.header_len];
+                self.gcm_enc.encryptTls13(ciphertext, auth_tag, ciphertext, ad, iv);
                 self.bumpEncryptNpub();
             } else {
                 AeadType.encrypt(ciphertext, auth_tag, ciphertext, header, iv, self.encrypt_key);
@@ -684,7 +685,8 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
 
             const iv = if (comptime has_cached_gcm) self.decrypt_npub else ivWithSeq(nonce_len, self.decrypt_iv, self.decrypt_seq);
             if (comptime has_cached_gcm) {
-                self.gcm_dec.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv) catch return error.TlsBadRecordMac;
+                const ad: *const [record.header_len]u8 = rec.header[0..record.header_len];
+                self.gcm_dec.decryptTls13(buf[0..ciphertext_len], ciphertext, auth_tag.*, ad, iv) catch return error.TlsBadRecordMac;
                 self.bumpDecryptNpub();
             } else {
                 AeadType.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
@@ -1045,6 +1047,16 @@ pub const CipherSuite = enum(u16) {
             => .sha384,
             else => .sha256,
         };
+    }
+
+    /// When every offered suite uses the same handshake hash, return it.
+    pub fn uniformHashTag(list: []const CipherSuite) ?HashTag {
+        if (list.len == 0) return null;
+        const first = list[0].hash();
+        for (list[1..]) |cs| {
+            if (cs.hash() != first) return null;
+        }
+        return first;
     }
 };
 
