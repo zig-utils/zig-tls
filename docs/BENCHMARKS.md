@@ -41,7 +41,7 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | BoringSSL (~7% ahead; ECDSA sign dominates) |
+| Cert handshake | Near parity (varies; ECDSA sign dominates) |
 | Transfer AES-128 send | Parity |
 | Transfer AES-128 recv | Parity |
 | Transfer AES-256 | BoringSSL (~1–2%) |
@@ -104,7 +104,11 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **ECDSA scalar invert (verify):** Brian Smith 292-step addition chain in
   `p256/scalar_invert_chain.zig` replaces generic Fermat `pow` on the verify path.
 - **CertificateVerify sign path:** TLS 1.3 ECDSA signing uses incremental
-  `serverCertificateVerifyDigest` and `signatureToDerTls` (fixed 72-byte layout).
+  `serverCertificateVerifyDigest`, `ecdsa_p256.signPrehashed` (nistz `mulBaseVarTime`,
+  `addMixedVarTime`, `xCoordVarTime`, scalar `invertVarTime`), and `signatureToDerTls`
+  (fixed 72-byte layout).
+- **nistz mulBase (sign):** `mulBaseProjectiveVarTime` skips identity `cMov` and
+  `rejectIdentity`; Booth negation uses in-place `fiat.opp` on table limbs.
 - **ECDSA verify nistz split:** `mulDoubleBasePublic` uses `nistz mulBase` + cached
   affine `pcMulAffineVarTime` + one add when nistz is enabled; `affineCoordinatesVarTime`
   avoids CT field invert on the result x-coordinate.

@@ -66,6 +66,12 @@ fn jacobianToP256(j: Jacobian) IdentityElementError!P256 {
 }
 
 fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
+    const ret = mulBaseProjectiveVarTime(s);
+    try ret.rejectIdentity();
+    return ret;
+}
+
+fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
     var ret_is_zero = true;
     var ret = P256.identityElement;
 
@@ -77,20 +83,34 @@ fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
         if (mag == 0) continue;
 
         const pt = selectAffine(table.ecp_nistz256_precomputed[row_i], mag - 1, row_i);
-        var y = feFromMontgomeryLimbs(pt.y);
-        if ((wvalue & 1) != 0) y = y.neg();
-        const t = P256{ .x = feFromMontgomeryLimbs(pt.x), .y = y, .z = Fe.one };
+        var y_limbs = pt.y;
+        if ((wvalue & 1) != 0) {
+            var y_neg: coord.Coord = undefined;
+            fiat.opp(&y_neg, pt.y);
+            y_limbs = y_neg;
+        }
+        const aff = p256.AffineCoordinates{
+            .x = feFromMontgomeryLimbs(pt.x),
+            .y = feFromMontgomeryLimbs(y_limbs),
+        };
 
         if (!ret_is_zero) {
-            ret = ret.addMixed(.{ .x = t.x, .y = t.y });
+            ret = ret.addMixedVarTime(aff);
         } else {
-            ret = t;
+            ret = .{ .x = aff.x, .y = aff.y, .z = Fe.one };
             ret_is_zero = false;
         }
     }
 
-    try ret.rejectIdentity();
     return ret;
+}
+
+/// Variable-time k*G without identity check (ECDSA sign hot path).
+pub fn mulBaseVarTime(s: [32]u8) P256 {
+    if (!@inComptime() and coord.hw.enabled and use_bedrock_mul_base) {
+        return mulBaseJacobian(s) catch unreachable;
+    }
+    return mulBaseProjectiveVarTime(s);
 }
 
 fn mulBaseJacobian(s: [32]u8) IdentityElementError!P256 {

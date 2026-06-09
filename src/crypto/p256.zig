@@ -181,6 +181,15 @@ pub const P256 = struct {
     /// Add P256 points, the second being specified using affine coordinates.
     // Algorithm 5 from https://eprint.iacr.org/2015/1060.pdf
     pub fn addMixed(p: P256, q: AffineCoordinates) P256 {
+        return addMixedInternal(p, q, true);
+    }
+
+    /// Variable-time projective mixed add (nistz mulBase / verify hot path).
+    pub fn addMixedVarTime(p: P256, q: AffineCoordinates) P256 {
+        return addMixedInternal(p, q, false);
+    }
+
+    fn addMixedInternal(p: P256, q: AffineCoordinates, comptime ct: bool) P256 {
         var t0 = p.x.mul(q.x);
         var t1 = p.y.mul(q.y);
         var t3 = q.x.add(q.y);
@@ -222,25 +231,7 @@ pub const P256 = struct {
             .y = Y3,
             .z = Z3,
         };
-        ret.cMov(p, @intFromBool(q.x.isZero()));
-        return ret;
-    }
-
-    /// Variable-time mixed add using Bedrock coord math when hw is available.
-    pub fn addMixedVarTime(p: P256, q: AffineCoordinates) P256 {
-        if (@inComptime() or !coord.hw.enabled) return addMixed(p, q);
-        if (q.x.isZero()) return p;
-
-        const pj: [3]coord.Coord = .{ p.x.limbs, p.y.limbs, p.z.limbs };
-        const qj: [2]coord.Coord = .{ q.x.limbs, q.y.limbs };
-        var out: [3]coord.Coord = undefined;
-        const ok = coord.addMixedAffine(&out, pj, qj);
-        var ret = P256{
-            .x = .{ .limbs = out[0] },
-            .y = .{ .limbs = out[1] },
-            .z = .{ .limbs = out[2] },
-        };
-        ret.cMov(p, @intFromBool(!ok));
+        if (ct) ret.cMov(p, @intFromBool(q.x.isZero()));
         return ret;
     }
 
@@ -329,6 +320,11 @@ pub const P256 = struct {
         };
     }
 
+    /// Affine x-coordinate only (ECDSA sign hot path).
+    pub fn xCoordVarTime(p: P256) Fe {
+        return p.x.mul(p.z.invertVarTime());
+    }
+
     /// Return true if both coordinate sets represent the same point.
     pub fn equivalent(a: P256, b: P256) bool {
         if (a.sub(b).rejectIdentity()) {
@@ -399,7 +395,7 @@ pub const P256 = struct {
         while (true) : (pos -= 1) {
             const slot = e[pos];
             if (slot > 0) {
-                q = q.addMixed(pc[@as(usize, @intCast(slot))]);
+                q = q.addMixedVarTime(pc[@as(usize, @intCast(slot))]);
             } else if (slot < 0) {
                 q = q.subMixed(pc[@as(usize, @intCast(-slot))]);
             }
@@ -572,5 +568,4 @@ pub const AffineCoordinates = struct {
     }
 };
 
-// Bedrock Jacobian addMixedAffine is not equivalent to projective Algorithm 5 addMixed;
-// addMixedVarTime remains available for a future Jacobian point stack port.
+// Bedrock Jacobian addMixedAffine is not equivalent to projective Algorithm 5 addMixed.

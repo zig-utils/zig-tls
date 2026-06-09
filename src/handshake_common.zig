@@ -350,7 +350,10 @@ pub const CertificateBuilder = struct {
                             else => unreachable,
                         });
                         const digest = hash_state.finalResult();
-                        break :blk try key_pair.signPrehashed(digest, null);
+                        break :blk if (comptime_scheme == .ecdsa_secp256r1_sha256)
+                            try ecdsa_p256.signPrehashed(key_pair, digest, null)
+                        else
+                            try key_pair.signPrehashed(digest, null);
                     },
                     .tls_1_3 => blk: {
                         const Hash = switch (comptime_scheme) {
@@ -370,7 +373,10 @@ pub const CertificateBuilder = struct {
                             },
                             else => unreachable,
                         }
-                        break :blk try key_pair.signPrehashed(digest, null);
+                        break :blk if (comptime_scheme == .ecdsa_secp256r1_sha256)
+                            try ecdsa_p256.signPrehashed(key_pair, digest, null)
+                        else
+                            try key_pair.signPrehashed(digest, null);
                     },
                     else => unreachable,
                 };

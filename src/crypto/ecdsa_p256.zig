@@ -3,9 +3,14 @@ const std = @import("std");
 const crypto = std.crypto;
 
 const p256 = @import("p256.zig");
+const nistz_base = @import("p256_nistz.zig");
 pub const P256 = p256.P256;
 const AffineCoordinates = p256.AffineCoordinates;
+const Fe = P256.Fe;
 pub const EcdsaP256Sha256 = crypto.sign.ecdsa.Ecdsa(P256, crypto.hash.sha2.Sha256);
+
+const Prf = crypto.auth.hmac.Hmac(crypto.hash.sha2.Sha256);
+const noise_length = EcdsaP256Sha256.noise_length;
 
 const EncodingError = crypto.errors.EncodingError;
 const IdentityElementError = crypto.errors.IdentityElementError;
@@ -19,6 +24,65 @@ fn hashToScalar(msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8) scalar.Scal
     var xs: [48]u8 = @splat(0);
     @memcpy(xs[48 - msg_hash.len ..], msg_hash[0..]);
     return scalar.Scalar.fromBytes48(xs, .big);
+}
+
+fn deterministicScalar(
+    h: [crypto.hash.sha2.Sha256.digest_length]u8,
+    secret_key: scalar.CompressedScalar,
+    noise: ?[noise_length]u8,
+) scalar.Scalar {
+    var k: [h.len]u8 = @splat(0);
+    var m: [h.len + 1 + noise_length + secret_key.len + h.len]u8 = @splat(0);
+    var t: [scalar.encoded_length]u8 = @splat(0);
+    const m_v = m[0..h.len];
+    const m_i = &m[m_v.len];
+    const m_z = m[m_v.len + 1 ..][0..noise_length];
+    const m_x = m[m_v.len + 1 + noise_length ..][0..secret_key.len];
+    const m_h = m[m.len - h.len ..];
+
+    @memset(m_v, 0x01);
+    m_i.* = 0x00;
+    if (noise) |n| @memcpy(m_z, &n);
+    @memcpy(m_x, &secret_key);
+    @memcpy(m_h, &h);
+    Prf.create(&k, &m, &k);
+    Prf.create(m_v, m_v, &k);
+    m_i.* = 0x01;
+    Prf.create(&k, &m, &k);
+    Prf.create(m_v, m_v, &k);
+    while (true) {
+        var t_off: usize = 0;
+        while (t_off < t.len) : (t_off += m_v.len) {
+            const t_end = @min(t_off + m_v.len, t.len);
+            Prf.create(m_v, m_v, &k);
+            @memcpy(t[t_off..t_end], m_v[0 .. t_end - t_off]);
+        }
+        if (scalar.Scalar.fromBytes(t, .big)) |s| return s else |_| {}
+        m_i.* = 0x00;
+        Prf.create(&k, m[0 .. m_v.len + 1], &k);
+        Prf.create(m_v, m_v, &k);
+    }
+}
+
+/// Fast TLS CertificateVerify sign: nistz mulBase, x-only affine, var-time scalar invert.
+pub fn signPrehashed(
+    key_pair: EcdsaP256Sha256.KeyPair,
+    msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8,
+    noise: ?[noise_length]u8,
+) (IdentityElementError || NonCanonicalError)!Signature {
+    const z = hashToScalar(msg_hash);
+    const k = deterministicScalar(msg_hash, key_pair.secret_key.bytes, noise);
+    const k_le = Fe.orderSwap(k.toBytes(.big));
+    const p = if (nistz_base.enabled) nistz_base.mulBaseVarTime(k_le) else try P256.basePoint.mul(k.toBytes(.big), .big);
+    const r = feBytesToScalar(p.xCoordVarTime().toBytes(.big));
+    if (r.isZero()) return error.IdentityElement;
+
+    const k_inv = k.invertVarTime();
+    const d = try scalar.Scalar.fromBytes(key_pair.secret_key.bytes, .big);
+    const s = k_inv.mul(z.add(r.mul(d)));
+    if (s.isZero()) return error.IdentityElement;
+
+    return Signature{ .r = r.toBytes(.big), .s = s.toBytes(.big) };
 }
 
 fn feBytesToScalar(x_bytes: [P256.Fe.encoded_length]u8) scalar.Scalar {
@@ -96,6 +160,20 @@ pub fn signatureFromDerTls(der: []const u8) EncodingError!Signature {
     var sig: Signature = undefined;
     if (parseTlsDerP256(der, &sig)) return sig;
     return Signature.fromDer(der);
+}
+
+test "signPrehashed matches std signPrehashed" {
+    var seed: [EcdsaP256Sha256.KeyPair.seed_length]u8 = undefined;
+    @memset(&seed, 0x42);
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const msg = "TLS 1.3, server CertificateVerify";
+    var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    crypto.hash.sha2.Sha256.hash(msg, &digest, .{});
+    const std_sig = try kp.signPrehashed(digest, null);
+    const fast_sig = try signPrehashed(kp, digest, null);
+    try std.testing.expectEqualSlices(u8, &std_sig.r, &fast_sig.r);
+    try std.testing.expectEqualSlices(u8, &std_sig.s, &fast_sig.s);
+    try fast_sig.verifyPrehashed(digest, kp.public_key);
 }
 
 test "signatureToDerTls roundtrips signatureFromDerTls" {
