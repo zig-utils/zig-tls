@@ -10,6 +10,7 @@ const table = @import("p256/nistz_table.zig");
 const coord = @import("p256_coord.zig");
 const field_inv_sqr = @import("p256/field_inv_sqr_chain.zig");
 const fiat = @import("p256_fiat_hw.zig");
+const bedrock_c = @import("bedrock_c_enabled.zig");
 
 pub const enabled = builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64;
 
@@ -107,6 +108,9 @@ fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
 
 /// Variable-time k*G without identity check (ECDSA sign hot path).
 pub fn mulBaseVarTime(s: [32]u8) P256 {
+    if (!@inComptime() and bedrock_c.enabled) {
+        return mulBaseBedrockC(s) catch unreachable;
+    }
     if (!@inComptime() and coord.hw.enabled and use_bedrock_mul_base) {
         return mulBaseJacobian(s) catch unreachable;
     }
@@ -147,11 +151,19 @@ fn mulBaseJacobian(s: [32]u8) IdentityElementError!P256 {
     return jacobianToP256(acc);
 }
 
-/// Bedrock Jacobian accumulation (Bedrock `p256_point_double`; slower than projective on Zig today).
+fn mulBaseBedrockC(s: [32]u8) IdentityElementError!P256 {
+    const mul = @extern(*const fn (out: *[3][4]u64, scalar: *const [32]u8) callconv(.c) void, .{ .name = "p256_bedrock_mul_base" });
+    var j: [3][4]u64 = undefined;
+    mul(&j, &s);
+    return jacobianToP256(.{ j[0], j[1], j[2] });
+}
+
+/// Bedrock Jacobian accumulation in Zig (Bedrock `p256_point_double`).
 pub const use_bedrock_mul_base = false;
 
 /// Variable-time k*G using nistz precomputed affine table (signing hot path).
 pub fn mulBase(s: [32]u8) IdentityElementError!P256 {
+    if (!@inComptime() and bedrock_c.enabled) return mulBaseBedrockC(s);
     if (!@inComptime() and coord.hw.enabled and use_bedrock_mul_base) return mulBaseJacobian(s);
     return mulBaseProjective(s);
 }

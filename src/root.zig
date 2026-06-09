@@ -2,6 +2,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
 
+comptime {
+    if (@import("crypto/bedrock_c_enabled.zig").enabled) {
+        _ = @import("crypto/p256_bedrock_exports.zig");
+    }
+}
+
 pub const max_ciphertext_record_len = @import("cipher.zig").max_ciphertext_record_len;
 
 /// Buffer of this size will fit any tls ciphertext record sent by other side.

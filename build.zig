@@ -3,6 +3,10 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const bedrock_c_mul_base = b.option(bool, "bedrock-c-mul-base", "Link Bedrock C P-256 mul_base") orelse false;
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "bedrock_c_mul_base", bedrock_c_mul_base);
 
     // Main TLS module
     const tls_module = b.addModule("tls", .{
@@ -10,6 +14,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    tls_module.addOptions("build_options", build_options);
     addHwCryptoAsm(b, tls_module, target);
 
     // Unit tests
@@ -18,10 +23,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib_mod.addOptions("build_options", build_options);
     addHwCryptoAsm(b, lib_mod, target);
     const unit_tests = b.addTest(.{
         .root_module = lib_mod,
     });
+    addBedrockCMulBase(b, unit_tests, bedrock_c_mul_base);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
@@ -37,6 +44,7 @@ pub fn build(b: *std.Build) void {
         .name = "bench",
         .root_module = bench_mod,
     });
+    addBedrockCMulBase(b, bench_exe, bedrock_c_mul_base);
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run TLS benchmarks");
     bench_step.dependOn(&run_bench.step);
@@ -75,6 +83,16 @@ pub fn build(b: *std.Build) void {
         fuzz_step.dependOn(&b.addInstallArtifact(record_fuzz, .{}).step);
         fuzz_step.dependOn(&b.addInstallArtifact(handshake_fuzz, .{}).step);
     }
+}
+
+fn addBedrockCMulBase(b: *std.Build, compile: *std.Build.Step.Compile, enabled: bool) void {
+    if (!enabled) return;
+    compile.root_module.link_libc = true;
+    compile.root_module.addIncludePath(b.path("src/crypto/c/bedrock"));
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/crypto/c/bedrock/bedrock_mul_base.c"),
+        .flags = &.{"-std=c11", "-O3"},
+    });
 }
 
 fn addHwCryptoAsm(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
