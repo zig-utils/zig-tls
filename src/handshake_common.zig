@@ -489,6 +489,11 @@ const prewarm_trusted_max = 32;
 fn findTrustedCertDer(h: *const CertificateParser, der: []const u8) ?u32 {
     const leaf_hash = std.hash.Wyhash.hash(0, der);
     const der_len: u32 = @intCast(der.len);
+    if (h.cached_leaf_ready and der_len == h.cached_leaf_der_len and leaf_hash == h.cached_leaf_hash) {
+        for (h.prewarmed_trusted.entries[0..h.prewarmed_trusted.count]) |entry| {
+            if (entry.der_len == der_len and entry.hash == leaf_hash) return entry.bytes_index;
+        }
+    }
     for (h.prewarmed_trusted.entries[0..h.prewarmed_trusted.count]) |entry| {
         if (entry.der_len == der_len and entry.hash == leaf_hash and
             bundleContainsCertDer(h.root_ca, entry.bytes_index, der))
