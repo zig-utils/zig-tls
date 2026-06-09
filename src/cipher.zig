@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const crypto = std.crypto;
 const hkdfExpandLabel = crypto.tls.hkdfExpandLabel;
+const tls_hkdf = @import("tls_hkdf.zig");
 
 const Sha1 = crypto.hash.Sha1;
 const Sha256 = crypto.hash.sha2.Sha256;
@@ -558,10 +559,10 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
         }
 
         fn keyGenerate(self: *Self) void {
-            self.encrypt_key = hkdfExpandLabel(Hkdf, self.encrypt_secret, "key", "", key_len);
-            self.decrypt_key = hkdfExpandLabel(Hkdf, self.decrypt_secret, "key", "", key_len);
-            self.encrypt_iv = hkdfExpandLabel(Hkdf, self.encrypt_secret, "iv", "", nonce_len);
-            self.decrypt_iv = hkdfExpandLabel(Hkdf, self.decrypt_secret, "iv", "", nonce_len);
+            self.encrypt_key = tls_hkdf.expandLabelEmpty(Hkdf, self.encrypt_secret, "key", key_len);
+            self.decrypt_key = tls_hkdf.expandLabelEmpty(Hkdf, self.decrypt_secret, "key", key_len);
+            self.encrypt_iv = tls_hkdf.expandLabelEmpty(Hkdf, self.encrypt_secret, "iv", nonce_len);
+            self.decrypt_iv = tls_hkdf.expandLabelEmpty(Hkdf, self.decrypt_secret, "iv", nonce_len);
             self.refreshGcm();
         }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const crypto = std.crypto;
 const tls = crypto.tls;
 const hkdfExpandLabel = tls.hkdfExpandLabel;
+const tls_hkdf = @import("tls_hkdf.zig");
 
 const Sha256 = crypto.hash.sha2.Sha256;
 const Sha384 = crypto.hash.sha2.Sha384;
@@ -297,6 +298,7 @@ fn TranscriptT(comptime Hash: type) type {
 
         hash: Hash,
         handshake_secret: ?[hash_length]u8 = null,
+        master_secret: ?[hash_length]u8 = null,
         server_finished_key: [hash_length]u8 = undefined,
         client_finished_key: [hash_length]u8 = undefined,
         buffer: [hash_length + 64 + 34]u8 = undefined,
@@ -435,8 +437,8 @@ fn TranscriptT(comptime Hash: type) type {
             const client_secret = hkdfExpandLabel(Hkdf, secret, "c hs traffic", &hello_hash, hash_length);
             const server_secret = hkdfExpandLabel(Hkdf, secret, "s hs traffic", &hello_hash, hash_length);
 
-            self.server_finished_key = hkdfExpandLabel(Hkdf, server_secret, "finished", "", hash_length);
-            self.client_finished_key = hkdfExpandLabel(Hkdf, client_secret, "finished", "", hash_length);
+            self.server_finished_key = tls_hkdf.expandLabelEmpty(Hkdf, server_secret, "finished", hash_length);
+            self.client_finished_key = tls_hkdf.expandLabelEmpty(Hkdf, client_secret, "finished", hash_length);
 
             self.buffer[0..hash_length].* = client_secret;
             self.buffer[hash_length .. 2 * hash_length].* = server_secret;
@@ -452,6 +454,7 @@ fn TranscriptT(comptime Hash: type) type {
             const zeroes: [hash_length]u8 = @splat(0);
             const ap_derived_secret = hkdfExpandLabel(Hkdf, self.handshake_secret.?, "derived", &empty_hash, hash_length);
             const master_secret = Hkdf.extract(&ap_derived_secret, &zeroes);
+            self.master_secret = master_secret;
 
             self.buffer[0..hash_length].* = hkdfExpandLabel(Hkdf, master_secret, "c ap traffic", &handshake_hash, hash_length);
             self.buffer[hash_length .. 2 * hash_length].* = hkdfExpandLabel(Hkdf, master_secret, "s ap traffic", &handshake_hash, hash_length);
@@ -463,9 +466,11 @@ fn TranscriptT(comptime Hash: type) type {
 
         fn resumptionSecret(self: *Self) []const u8 {
             const handshake_hash = self.hash.peek();
-            const zeroes: [hash_length]u8 = @splat(0);
-            const ap_derived_secret = hkdfExpandLabel(Hkdf, self.handshake_secret.?, "derived", &empty_hash, hash_length);
-            const master_secret = Hkdf.extract(&ap_derived_secret, &zeroes);
+            const master_secret = self.master_secret orelse blk: {
+                const zeroes: [hash_length]u8 = @splat(0);
+                const ap_derived_secret = hkdfExpandLabel(Hkdf, self.handshake_secret.?, "derived", &empty_hash, hash_length);
+                break :blk Hkdf.extract(&ap_derived_secret, &zeroes);
+            };
             self.buffer[0..hash_length].* = hkdfExpandLabel(Hkdf, master_secret, "res master", &handshake_hash, hash_length);
             return self.buffer[0..hash_length];
         }
@@ -473,7 +478,7 @@ fn TranscriptT(comptime Hash: type) type {
         fn pskBinder(self: *Self) []const u8 {
             const secret = self.handshake_secret.?;
             const prk = hkdfExpandLabel(Hkdf, secret, "res binder", &empty_hash, hash_length);
-            const expanded = hkdfExpandLabel(Hkdf, prk, "finished", "", hash_length);
+            const expanded = tls_hkdf.expandLabelEmpty(Hkdf, prk, "finished", hash_length);
             Hmac.create(self.buffer[0..hash_length], &self.hash.peek(), &expanded);
             return self.buffer[0..hash_length];
         }
@@ -507,7 +512,7 @@ fn pskBinder_(
     const ikm = hkdfExpandLabel(Hkdf, resumption_master_secret, "resumption", ticket_nonce, Hash.digest_length);
     const secret = Hkdf.extract(&[1]u8{0}, &ikm);
     const prk = hkdfExpandLabel(Hkdf, secret, "res binder", &tls.emptyHash(Hash), Hash.digest_length);
-    const expanded = hkdfExpandLabel(Hkdf, prk, "finished", "", Hash.digest_length);
+    const expanded = tls_hkdf.expandLabelEmpty(Hkdf, prk, "finished", Hash.digest_length);
     Hmac.create(binder, &binder_hash, &expanded);
 }
 
@@ -531,7 +536,7 @@ test pskBinder_ {
     const ikm = hkdfExpandLabel(Hkdf, resumption_master_secret, "resumption", &ticket_nonce, Hash.digest_length);
     const secret = Hkdf.extract(&[1]u8{0}, &ikm);
     const prk = hkdfExpandLabel(Hkdf, secret, "res binder", &tls.emptyHash(Hash), Hash.digest_length);
-    const expanded = hkdfExpandLabel(Hkdf, prk, "finished", "", Hash.digest_length);
+    const expanded = tls_hkdf.expandLabelEmpty(Hkdf, prk, "finished", Hash.digest_length);
     var binder: [Hash.digest_length]u8 = undefined;
     Hmac.create(&binder, &binder_hash, &expanded);
 
