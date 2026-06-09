@@ -71,6 +71,27 @@ pub fn nonzero(x: Coord) bool {
     return (x[0] | x[1] | x[2] | x[3]) != 0;
 }
 
+fn minushalfConditional(mask: Limb) Coord {
+    const mh0: Limb = mask;
+    const mh1: Limb = mh0 >> 33;
+    const mh2: Limb = mh0 << 63;
+    const mh3: Limb = (mh0 << 32) >> 1;
+    return .{ mh0, mh1, mh2, mh3 };
+}
+
+/// Field halve mod p (Bedrock `p256_coord_halve`).
+pub fn halve(out: *Coord, x: Coord) void {
+    const mask: Limb = 0 -% (x[0] & 1);
+    const mh = minushalfConditional(mask);
+    const shifted: Coord = .{
+        (x[0] >> 1) | (x[1] << 63),
+        (x[1] >> 1) | (x[2] << 63),
+        (x[2] >> 1) | (x[3] << 63),
+        x[3] >> 1,
+    };
+    subCoord(out, shifted, mh);
+}
+
 pub fn mul(out: *Coord, x: Coord, y: Coord) void {
     if (!@inComptime() and hw.enabled) {
         hw.mul(out, x, y);
@@ -119,44 +140,38 @@ pub fn addMixedAffine(out: *[3]Coord, p: [3]Coord, q: [2]Coord) bool {
     return ok;
 }
 
-/// Jacobian point double (BoringSSL `point_double`, a = -3).
-pub fn doubleJacobian(out: *[3]Coord, p: [3]Coord) void {
-    var delta: Coord = undefined;
-    var gamma: Coord = undefined;
-    var beta: Coord = undefined;
-    var alpha: Coord = undefined;
-    var ftmp: Coord = undefined;
-    var ftmp2: Coord = undefined;
-    var tmptmp: Coord = undefined;
-    var fourbeta: Coord = undefined;
+/// Jacobian point double (Bedrock `p256_point_double`).
+pub fn doublePoint(out: *[3]Coord, p: [3]Coord) void {
+    var d: Coord = undefined;
+    var tmp: Coord = undefined;
+    var a: Coord = undefined;
+    var t2: Coord = undefined;
 
-    sqr(&delta, p[2]);
-    sqr(&gamma, p[1]);
-    mul(&beta, p[0], gamma);
+    add(&d, p[1], p[1]);
+    sqr(&tmp, p[2]);
+    sqr(&d, d);
+    mul(&out[2], p[2], p[1]);
+    add(&out[2], out[2], out[2]);
+    add(&a, p[0], tmp);
+    subCoord(&tmp, p[0], tmp);
+    add(&t2, tmp, tmp);
+    add(&tmp, t2, tmp);
+    sqr(&out[1], d);
+    mul(&a, a, tmp);
+    mul(&d, d, p[0]);
+    sqr(&out[0], a);
+    add(&tmp, d, d);
+    subCoord(&out[0], out[0], tmp);
+    subCoord(&d, d, out[0]);
+    mul(&d, d, a);
+    halve(&out[1], out[1]);
+    subCoord(&out[1], d, out[1]);
+}
 
-    subCoord(&ftmp, p[0], delta);
-    add(&ftmp2, p[0], delta);
-    add(&tmptmp, ftmp2, ftmp2);
-    add(&ftmp2, ftmp2, tmptmp);
-    mul(&alpha, ftmp, ftmp2);
-
-    sqr(&out[0], alpha);
-    add(&fourbeta, beta, beta);
-    add(&fourbeta, fourbeta, fourbeta);
-    add(&tmptmp, fourbeta, fourbeta);
-    subCoord(&out[0], out[0], tmptmp);
-
-    add(&delta, gamma, delta);
-    add(&ftmp, p[1], p[2]);
-    sqr(&out[2], ftmp);
-    subCoord(&out[2], out[2], delta);
-
-    subCoord(&out[1], fourbeta, out[0]);
-    add(&gamma, gamma, gamma);
-    sqr(&gamma, gamma);
-    mul(&out[1], alpha, out[1]);
-    add(&gamma, gamma, gamma);
-    subCoord(&out[1], out[1], gamma);
+/// Mixed affine add; doubles `p` when the points coincide (Bedrock mul_base path).
+pub fn addMixedAffineOrDouble(out: *[3]Coord, p: [3]Coord, q: [2]Coord) void {
+    if (addMixedAffine(out, p, q)) return;
+    doublePoint(out, p);
 }
 
 const std = @import("std");

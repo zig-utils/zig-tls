@@ -116,12 +116,8 @@ fn mulBaseJacobian(s: [32]u8) IdentityElementError!P256 {
 
         if (!ret_is_zero) {
             var out: Jacobian = undefined;
-            if (coord.addMixedAffine(&out, acc, q_affine)) {
-                acc = out;
-            } else {
-                coord.doubleJacobian(&out, acc);
-                acc = out;
-            }
+            coord.addMixedAffineOrDouble(&out, acc, q_affine);
+            acc = out;
         } else {
             acc = .{ pt.x, y_limbs, one_z };
             ret_is_zero = false;
@@ -131,7 +127,7 @@ fn mulBaseJacobian(s: [32]u8) IdentityElementError!P256 {
     return jacobianToP256(acc);
 }
 
-/// Use Bedrock Jacobian accumulation when true (tested; projective is faster on Zig coord add today).
+/// Bedrock Jacobian accumulation (Bedrock `p256_point_double`; slower than projective on Zig today).
 pub const use_bedrock_mul_base = false;
 
 /// Variable-time k*G using nistz precomputed affine table (signing hot path).
