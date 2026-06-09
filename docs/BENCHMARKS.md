@@ -24,8 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8530 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6500 /s** | ~6810 /s | ~0.95× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3840 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6700 /s** | ~6810 /s | ~0.98× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3640 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8530 MB/s** | ~8570 MB/s | ~0.99× |
 | Transfer recv AES-128-GCM (16 KiB) | **~8020 MB/s** | ~8020 MB/s | **~1.00×** |
 | Transfer send AES-256-GCM (16 KiB) | **~7960 MB/s** | ~8070 MB/s | ~0.99× |
@@ -41,7 +41,7 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | Near parity (varies; ECDSA sign dominates) |
+| Cert handshake | Near parity (~2%; ECDSA sign dominates) |
 | Transfer AES-128 send | Parity |
 | Transfer AES-128 recv | Parity |
 | Transfer AES-256 | BoringSSL (~1–2%) |
@@ -120,9 +120,10 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   `p256_point.br.c.inc` + BoringSSL nistz table; field mul/sqr call Zig hw asm
   via `p256_bedrock_exports.zig`. Default off (projective Zig path is faster on
   Apple Silicon today).
-- **ECDSA verify nistz split:** `mulDoubleBasePublic` uses `nistz mulBase` + cached
-  affine `pcMulAffineVarTime` + one add when nistz is enabled; `affineCoordinatesVarTime`
-  avoids CT field invert on the result x-coordinate.
+- **ECDSA verify nistz split:** `mulDoubleBaseVerify` uses `mulBaseVarTime` + cached
+  affine `pcMulAffineVarTime` (`dbl4`, `subMixedVarTime`) + one add; `xCoordVarTime`
+  extracts r without full affine conversion.
+- **P-256 sliding window:** `dbl4` coalesces four doublings in width-4 mul loops.
 - **TLS 1.3 GCM nonce cache:** `CachedAesGcm` reuses the counter=1 tag mask and counter=2
   CTR ivec per record nonce (bench transfer path uses a fixed nonce).
 - **Bedrock Jacobian mulBase (optional):** `mulBaseJacobian` uses Bedrock `p256_point_double`

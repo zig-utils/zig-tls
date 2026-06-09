@@ -129,11 +129,21 @@ fn benchRecordCryptoSend(
     const start = benchTime(io);
     var i: u32 = 0;
     while (i < transfer_iterations) : (i += 1) {
-        _ = switch (suite) {
-            .AES_128_GCM_SHA256 => try sender.AES_128_GCM_SHA256.encryptApplication(send_buf[0..], transfer_bytes),
-            .AES_256_GCM_SHA384 => try sender.AES_256_GCM_SHA384.encryptApplication(send_buf[0..], transfer_bytes),
+        switch (suite) {
+            .AES_128_GCM_SHA256 => {
+                const aes = &sender.AES_128_GCM_SHA256;
+                aes.encrypt_seq = 0;
+                aes.encrypt_npub = aes.encrypt_iv;
+                _ = try aes.encryptApplication(send_buf[0..], transfer_bytes);
+            },
+            .AES_256_GCM_SHA384 => {
+                const aes = &sender.AES_256_GCM_SHA384;
+                aes.encrypt_seq = 0;
+                aes.encrypt_npub = aes.encrypt_iv;
+                _ = try aes.encryptApplication(send_buf[0..], transfer_bytes);
+            },
             else => @compileError("bench supports AES-128/256 GCM only"),
-        };
+        }
     }
     const elapsed_ns = benchTime(io) - start;
     const total_mb = @as(f64, @floatFromInt(transfer_bytes * transfer_iterations)) / (1024 * 1024);

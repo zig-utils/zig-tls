@@ -351,6 +351,24 @@ test "CachedAesGcm encryptTls13 bulk matches generic" {
     try testing.expectEqualSlices(u8, &m, &out);
 }
 
+test "CachedAesGcm AES-256 decryptTls13 roundtrip" {
+    const Cached = CachedAesGcm(crypto.core.aes.Aes256);
+    var key: [32]u8 = undefined;
+    @memset(&key, 0x11);
+    var ctx = Cached.fromKey(key);
+    var npub: [12]u8 = undefined;
+    @memset(&npub, 0x22);
+    var ad: [5]u8 = .{ 0x17, 0x03, 0x03, 0x40, 0x11 };
+    var m: [16385]u8 = undefined;
+    @memset(&m, 0xee);
+    var c: [m.len]u8 = undefined;
+    var tag: [16]u8 = undefined;
+    ctx.encryptTls13(&c, &tag, &m, &ad, npub);
+    var out: [m.len]u8 = undefined;
+    try ctx.decryptTls13(&out, &c, tag, &ad, npub);
+    try testing.expectEqualSlices(u8, &m, &out);
+}
+
 test "CachedAesGcm roundtrip" {
     const Cached = CachedAesGcm(crypto.core.aes.Aes128);
     var key: [Cached.key_length]u8 = undefined;
