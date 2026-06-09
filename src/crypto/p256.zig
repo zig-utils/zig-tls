@@ -5,6 +5,7 @@ const meta = std.meta;
 
 const nistz_base = @import("p256_nistz.zig");
 const coord = @import("p256_coord.zig");
+const field_inv_sqr = @import("p256/field_inv_sqr_chain.zig");
 
 const EncodingError = crypto.errors.EncodingError;
 const IdentityElementError = crypto.errors.IdentityElementError;
@@ -311,18 +312,23 @@ pub const P256 = struct {
         return ret;
     }
 
+    fn zInvVarTime(z: Fe) Fe {
+        return field_inv_sqr.invSqrMont(z).mul(z);
+    }
+
     /// Variable-time affine conversion for signature verification.
     pub fn affineCoordinatesVarTime(p: P256) AffineCoordinates {
-        const zinv = p.z.invertVarTime();
+        const z_inv = zInvVarTime(p.z);
         return .{
-            .x = p.x.mul(zinv),
-            .y = p.y.mul(zinv),
+            .x = p.x.mul(z_inv),
+            .y = p.y.mul(z_inv),
         };
     }
 
     /// Affine x-coordinate only (ECDSA sign hot path).
     pub fn xCoordVarTime(p: P256) Fe {
-        return p.x.mul(p.z.invertVarTime());
+        const z_inv2 = field_inv_sqr.invSqrMont(p.z);
+        return p.x.mul(z_inv2).mul(p.z);
     }
 
     /// Return true if both coordinate sets represent the same point.

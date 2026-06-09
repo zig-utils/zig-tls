@@ -244,8 +244,14 @@ pub fn Field(comptime params: FieldParams) type {
             return fe;
         }
 
-        /// Variable-time inverse for verification (Fermat; scalar field uses addition chain in scalar.zig).
+        /// Variable-time inverse (P-256 base field: inv_square chain; scalar: addition chain).
         pub fn invertVarTime(a: Fe) Fe {
+            if (comptime field_order == 115792089210356248762697446949407573530086143415290314195533631308867097853951) {
+                return @import("field_invert.zig").invertVarTime(a);
+            }
+            if (comptime field_order == 115792089210356248762697446949407573529996955224135760342422259061068512044369) {
+                return @import("scalar_invert_chain.zig").invert(a);
+            }
             return a.pow(u256, field_order - 2);
         }
 

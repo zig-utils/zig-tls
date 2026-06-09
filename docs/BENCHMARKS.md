@@ -24,7 +24,7 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8530 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6320 /s** | ~6810 /s | ~0.93× |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6500 /s** | ~6810 /s | ~0.95× |
 | Handshake TLS 1.3 (ECDHE + cert + client verify) | **~3840 /s** | — | — |
 | Transfer send AES-128-GCM (16 KiB) | **~8530 MB/s** | ~8570 MB/s | ~0.99× |
 | Transfer recv AES-128-GCM (16 KiB) | **~8020 MB/s** | ~8020 MB/s | **~1.00×** |
@@ -109,6 +109,17 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   (fixed 72-byte layout).
 - **nistz mulBase (sign):** `mulBaseProjectiveVarTime` skips identity `cMov` and
   `rejectIdentity`; Booth negation uses in-place `fiat.opp` on table limbs.
+- **P-256 field invert (sign/verify):** `field_invert.zig` uses Brian Smith
+  `invSqrMont` chain + multiply (`a^{-1} = a^{-2}·a`); `xCoordVarTime` avoids
+  full Fermat `pow` on ECDSA sign.
+- **CertificateVerify digest:** single-shot `Sha256.hash` over padded prefix +
+  transcript peek (no incremental `update` chain).
+- **Bench server reuse:** `nonblock.Server.reset()` + client `reset()` in
+  `bench/main.zig` avoid reallocating server state each iteration.
+- **Bedrock C mul_base (optional):** `-Dbedrock-c-mul-base=true` links vendored
+  `p256_point.br.c.inc` + BoringSSL nistz table; field mul/sqr call Zig hw asm
+  via `p256_bedrock_exports.zig`. Default off (projective Zig path is faster on
+  Apple Silicon today).
 - **ECDSA verify nistz split:** `mulDoubleBasePublic` uses `nistz mulBase` + cached
   affine `pcMulAffineVarTime` + one add when nistz is enabled; `affineCoordinatesVarTime`
   avoids CT field invert on the result x-coordinate.
