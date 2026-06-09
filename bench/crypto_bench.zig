@@ -1,10 +1,12 @@
-//! Isolated P-256 ECDSA / double-base micro-benchmarks (handshake breakdown).
+//! Isolated crypto micro-benchmarks and handshake breakdown estimates.
 const std = @import("std");
 const Io = std.Io;
+const crypto = std.crypto;
 const tls = @import("tls");
 const ecdsa = tls.ecdsa_p256;
 
 const crypto_iterations: u32 = if (@import("builtin").mode == .Debug) 1_000 else 100_000;
+const handshake_record_len: usize = 2048;
 
 pub fn run(
     io: Io,
@@ -28,15 +30,14 @@ pub fn run(
 
     var i: u32 = 0;
     while (i < 64) : (i += 1) {
-        try ecdsa.verifyPrehashed(sig, digest, pk, null, server_w7);
+        ecdsa.verifyPrehashed(sig, digest, pk, null, server_w7) catch unreachable;
     }
     var start = Io.Clock.awake.now(io).nanoseconds;
     i = 0;
     while (i < crypto_iterations) : (i += 1) {
-        try ecdsa.verifyPrehashed(sig, digest, pk, null, server_w7);
+        ecdsa.verifyPrehashed(sig, digest, pk, null, server_w7) catch unreachable;
     }
-    var elapsed_ns = Io.Clock.awake.now(io).nanoseconds - start;
-    const verify_rate = rate(crypto_iterations, elapsed_ns);
+    const verify_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
     try w.print("{s:<50} {d:>10.0} /s\n", .{ "ECDSA P-256 verifyPrehashed", verify_rate });
 
     i = 0;
@@ -48,9 +49,67 @@ pub fn run(
     while (i < crypto_iterations) : (i += 1) {
         _ = ecdsa.nistz.mulDoubleBaseVarTimeXFromTables(v1, v2, ecdsa.nistz.basePrecomputedTable(), server_w7);
     }
-    elapsed_ns = Io.Clock.awake.now(io).nanoseconds - start;
-    const double_base_rate = rate(crypto_iterations, elapsed_ns);
+    const double_base_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
     try w.print("{s:<50} {d:>10.0} /s\n", .{ "P-256 w7 double-base (x only)", double_base_rate });
+
+    var x25519_seed: [32]u8 = undefined;
+    @memset(&x25519_seed, 0x55);
+    const x25519_kp = crypto.dh.X25519.KeyPair.generateDeterministic(x25519_seed) catch unreachable;
+    const server_pk: [32]u8 = @splat(0x66);
+    i = 0;
+    while (i < 64) : (i += 1) {
+        _ = crypto.dh.X25519.scalarmult(x25519_kp.secret_key, server_pk) catch unreachable;
+    }
+    start = Io.Clock.awake.now(io).nanoseconds;
+    i = 0;
+    while (i < crypto_iterations) : (i += 1) {
+        _ = crypto.dh.X25519.scalarmult(x25519_kp.secret_key, server_pk) catch unreachable;
+    }
+    const x25519_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
+    try w.print("{s:<50} {d:>10.0} /s\n", .{ "X25519 ECDHE scalarmult", x25519_rate });
+
+    const hello_buf: [handshake_record_len]u8 = @splat(0xab);
+    i = 0;
+    while (i < 64) : (i += 1) {
+        var h = crypto.hash.sha2.Sha256.init(.{});
+        h.update(&hello_buf);
+        var out: [32]u8 = undefined;
+        _ = h.final(out[0..]);
+    }
+    start = Io.Clock.awake.now(io).nanoseconds;
+    i = 0;
+    while (i < crypto_iterations) : (i += 1) {
+        var h = crypto.hash.sha2.Sha256.init(.{});
+        h.update(&hello_buf);
+        var out: [32]u8 = undefined;
+        _ = h.final(out[0..]);
+    }
+    const sha_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
+    try w.print("{s:<50} {d:>10.0} /s\n", .{ "SHA-256 update 2 KiB", sha_rate });
+
+    const gcm_key: [16]u8 = @splat(0x42);
+    var gcm_ctx = tls.aes_gcm_cached.CachedAesGcm(crypto.core.aes.Aes128).fromKey(gcm_key);
+    var gcm_buf: [handshake_record_len + 32]u8 = undefined;
+    const gcm_ct = gcm_buf[5 .. 5 + handshake_record_len + 1];
+    var gcm_tag: [16]u8 = undefined;
+    const gcm_ad: *const [5]u8 = gcm_buf[0..5];
+    gcm_buf[0] = 0x17;
+    gcm_buf[1] = 0x03;
+    gcm_buf[2] = 0x03;
+    std.mem.writeInt(u16, gcm_buf[3..5], @as(u16, @intCast(handshake_record_len + 1 + 16)), .big);
+    const gcm_npub: [12]u8 = @splat(0x01);
+    const gcm_iters = crypto_iterations / 10;
+    i = 0;
+    while (i < 64) : (i += 1) {
+        gcm_ctx.encryptTls13(gcm_ct, &gcm_tag, gcm_ct[0 .. handshake_record_len + 1], gcm_ad, gcm_npub);
+    }
+    start = Io.Clock.awake.now(io).nanoseconds;
+    i = 0;
+    while (i < gcm_iters) : (i += 1) {
+        gcm_ctx.encryptTls13(gcm_ct, &gcm_tag, gcm_ct[0 .. handshake_record_len + 1], gcm_ad, gcm_npub);
+    }
+    const gcm_rate = rate(gcm_iters, Io.Clock.awake.now(io).nanoseconds - start);
+    try w.print("{s:<50} {d:>10.0} /s\n", .{ "AES-128-GCM TLS 1.3 ~2 KiB encrypt", gcm_rate });
 
     if (cert_hs_per_sec > 0 and verify_hs_per_sec > 0 and verify_rate > 0) {
         const ecdsa_ns = 1e9 / verify_rate;

@@ -127,6 +127,7 @@ pub const nonblock = struct {
 };
 
 pub const Ktls = @import("Ktls.zig");
+pub const aes_gcm_cached = @import("aes_gcm_cached.zig");
 
 fn pumpNonblockHandshake(cli: *nonblock.Client, srv: *nonblock.Server) !void {
     var cs_buf: [max_ciphertext_record_len]u8 = undefined;
