@@ -17,15 +17,24 @@ const bench_groups = &[_]tls.config.NamedGroup{.x25519};
 const bench_cipher_128 = &[_]tls.config.CipherSuite{.AES_128_GCM_SHA256};
 const bench_cipher_256 = &[_]tls.config.CipherSuite{.AES_256_GCM_SHA384};
 
-const bench_client_opt = tls.config.Client{
-    .host = "localhost",
-    .root_ca = .empty,
-    .insecure_skip_verify = true,
-    .cipher_suites = bench_cipher_128,
-    .named_groups = bench_groups,
-    .min_version = .tls_1_3,
-    .max_version = .tls_1_3,
-};
+fn benchClientOpt(
+    allocator: std.mem.Allocator,
+    server_w7: ?*const tls.config.W7Table,
+    root_ca: tls.config.cert.Bundle,
+    insecure_skip_verify: bool,
+) tls.config.Client {
+    return .{
+        .host = "localhost",
+        .root_ca = root_ca,
+        .insecure_skip_verify = insecure_skip_verify,
+        .cipher_suites = bench_cipher_128,
+        .named_groups = bench_groups,
+        .min_version = .tls_1_3,
+        .max_version = .tls_1_3,
+        .table_allocator = allocator,
+        .server_ecdsa_p256_w7_table = server_w7,
+    };
+}
 
 const bench_server_opt = tls.config.Server{
     .auth = null,
@@ -50,7 +59,9 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("{s:<50} {s:>12}\n", .{ "benchmark", "result" });
     try stdout.print("{s}\n", .{@as([64]u8, @splat('-'))});
 
-    try benchHandshake(init.io, stdout, bench_server_opt, "handshake TLS 1.3 (minimal ECDHE)");
+    const server_w7 = cert_key.ecdsa_p256_w7_table;
+
+    try benchHandshake(init.io, stdout, allocator, server_w7, bench_server_opt, "handshake TLS 1.3 (minimal ECDHE)");
     const cert_server_opt = tls.config.Server{
         .auth = &cert_key,
         .cipher_suites = bench_cipher_128,
@@ -59,23 +70,15 @@ pub fn main(init: std.process.Init) !void {
         .min_version = .tls_1_3,
         .max_version = .tls_1_3,
     };
-    try benchHandshake(init.io, stdout, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert)");
+    try benchHandshake(init.io, stdout, allocator, server_w7, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert)");
 
-    const verify_client_opt = tls.config.Client{
-        .host = "localhost",
-        .root_ca = cert_key.bundle,
-        .insecure_skip_verify = false,
-        .cipher_suites = bench_cipher_128,
-        .named_groups = bench_groups,
-        .min_version = .tls_1_3,
-        .max_version = .tls_1_3,
-    };
+    const verify_client_opt = benchClientOpt(allocator, server_w7, cert_key.bundle, false);
     try benchHandshakeVerify(init.io, stdout, verify_client_opt, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert + verify)");
 
-    try benchTransfer(init.io, stdout, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto send (AES-128)");
-    try benchTransferRecv(init.io, stdout, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto recv (AES-128)");
-    try benchTransfer(init.io, stdout, bench_cipher_256, .AES_256_GCM_SHA384, "transfer TLS 1.3 record crypto send (AES-256)");
-    try benchTransferRecv(init.io, stdout, bench_cipher_256, .AES_256_GCM_SHA384, "transfer TLS 1.3 record crypto recv (AES-256)");
+    try benchTransfer(init.io, stdout, allocator, server_w7, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto send (AES-128)");
+    try benchTransferRecv(init.io, stdout, allocator, server_w7, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto recv (AES-128)");
+    try benchTransfer(init.io, stdout, allocator, server_w7, bench_cipher_256, .AES_256_GCM_SHA384, "transfer TLS 1.3 record crypto send (AES-256)");
+    try benchTransferRecv(init.io, stdout, allocator, server_w7, bench_cipher_256, .AES_256_GCM_SHA384, "transfer TLS 1.3 record crypto recv (AES-256)");
     try stdout.flush();
 }
 
@@ -95,8 +98,16 @@ fn pumpHandshake(cli: *tls.nonblock.Client, srv: *tls.nonblock.Server) !void {
     }
 }
 
-fn benchHandshake(io: Io, w: anytype, server_opt: tls.config.Server, label: []const u8) !void {
-    try benchHandshakeVerify(io, w, bench_client_opt, server_opt, label);
+fn benchHandshake(
+    io: Io,
+    w: anytype,
+    allocator: std.mem.Allocator,
+    server_w7: ?*const tls.config.W7Table,
+    server_opt: tls.config.Server,
+    label: []const u8,
+) !void {
+    const client_opt = benchClientOpt(allocator, server_w7, .empty, true);
+    try benchHandshakeVerify(io, w, client_opt, server_opt, label);
 }
 
 fn benchHandshakeVerify(io: Io, w: anytype, client_opt: tls.config.Client, server_opt: tls.config.Server, label: []const u8) !void {
@@ -216,27 +227,35 @@ fn benchRecordCryptoRecv(
 fn benchTransfer(
     io: Io,
     w: anytype,
+    allocator: std.mem.Allocator,
+    server_w7: ?*const tls.config.W7Table,
     cipher_list: []const tls.config.CipherSuite,
     comptime suite: tls.config.CipherSuite,
     label: []const u8,
 ) !void {
-    var cli_cipher, _ = try setupConnection(cipher_list);
+    var cli_cipher, _ = try setupConnection(allocator, server_w7, cipher_list);
     try benchRecordCryptoSend(io, w, label, &cli_cipher, suite);
 }
 
 fn benchTransferRecv(
     io: Io,
     w: anytype,
+    allocator: std.mem.Allocator,
+    server_w7: ?*const tls.config.W7Table,
     cipher_list: []const tls.config.CipherSuite,
     comptime suite: tls.config.CipherSuite,
     label: []const u8,
 ) !void {
-    var cli_cipher, var srv_cipher = try setupConnection(cipher_list);
+    var cli_cipher, var srv_cipher = try setupConnection(allocator, server_w7, cipher_list);
     try benchRecordCryptoRecv(io, w, label, &cli_cipher, &srv_cipher, suite);
 }
 
-fn setupConnection(cipher_list: []const tls.config.CipherSuite) !struct { tls.Cipher, tls.Cipher } {
-    var cli_opt = bench_client_opt;
+fn setupConnection(
+    allocator: std.mem.Allocator,
+    server_w7: ?*const tls.config.W7Table,
+    cipher_list: []const tls.config.CipherSuite,
+) !struct { tls.Cipher, tls.Cipher } {
+    var cli_opt = benchClientOpt(allocator, server_w7, .empty, true);
     cli_opt.cipher_suites = cipher_list;
     var srv_opt = bench_server_opt;
     srv_opt.cipher_suites = cipher_list;

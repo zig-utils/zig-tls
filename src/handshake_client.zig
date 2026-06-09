@@ -30,6 +30,7 @@ const PrivateKey = @import("PrivateKey.zig");
 const proto = @import("protocol.zig");
 
 const common = @import("handshake_common.zig");
+const ecdsa_p256 = @import("crypto/ecdsa_p256.zig");
 const CertificateBuilder = common.CertificateBuilder;
 const CertificateParser = common.CertificateParser;
 const DhKeyPair = common.DhKeyPair;
@@ -86,6 +87,12 @@ pub const Options = struct {
 
     /// ALPN protocols to offer in ClientHello.
     alpn_protocols: []const alpn.Protocol = &.{},
+
+    /// Optional allocator for heap-cached P-256 w7 verify tables on parsed leaf keys.
+    table_allocator: ?mem.Allocator = null,
+
+    /// Borrowed server P-256 w7 table (e.g. bench `CertKeyPair.ecdsa_p256_w7_table`).
+    server_ecdsa_p256_w7_table: ?*const ecdsa_p256.W7Table = null,
 
     /// Minimum/maximum TLS protocol version.
     min_version: proto.Version = .tls_1_2,
@@ -282,6 +289,8 @@ pub const Handshake = struct {
             .host = opt.host,
             .root_ca = opt.root_ca,
             .skip_verify = opt.insecure_skip_verify,
+            .table_allocator = opt.table_allocator,
+            .borrowed_ecdsa_p256_w7_table = opt.server_ecdsa_p256_w7_table,
         };
         h.cert.prewarmTrustedLeaf() catch {};
     }
@@ -1420,6 +1429,9 @@ pub const NonBlock = struct {
         inner.cert.cached_not_after = cert_cache.cached_not_after;
         inner.cert.cached_leaf_der_len = cert_cache.cached_leaf_der_len;
         inner.cert.prewarmed_trusted = cert_cache.prewarmed_trusted;
+        inner.cert.table_allocator = cert_cache.table_allocator;
+        inner.cert.borrowed_ecdsa_p256_w7_table = cert_cache.borrowed_ecdsa_p256_w7_table;
+        inner.cert.owned_ecdsa_p256_w7_table = cert_cache.owned_ecdsa_p256_w7_table;
         if (cert_cache.cached_leaf_ready) {
             inner.cert.pub_key_algo = cert_cache.pub_key_algo;
             inner.cert.ecdsa_p256_pk = cert_cache.ecdsa_p256_pk;

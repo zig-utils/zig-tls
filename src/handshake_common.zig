@@ -57,6 +57,9 @@ pub const CertKeyPair = struct {
     /// Pre-serialized TLS 1.3 Certificate handshake message (type + len + body).
     tls13_certificate_msg: []const u8 = &.{},
 
+    /// Heap-cached w7 P-256 verify table for the leaf public key (P-256 only).
+    ecdsa_p256_w7_table: ?*ecdsa_p256.W7Table = null,
+
     pub fn fromFilePath(
         allocator: mem.Allocator,
         io: Io,
@@ -73,6 +76,7 @@ pub const CertKeyPair = struct {
 
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
         try pair.cacheTls13CertificateMessage(allocator);
+        try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
     }
 
@@ -92,6 +96,7 @@ pub const CertKeyPair = struct {
 
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
         try pair.cacheTls13CertificateMessage(allocator);
+        try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
     }
 
@@ -169,6 +174,7 @@ pub const CertKeyPair = struct {
 
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
         try pair.cacheTls13CertificateMessage(allocator);
+        try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
     }
 
@@ -200,6 +206,7 @@ pub const CertKeyPair = struct {
         const key = try PrivateKey.parsePem(key_pem);
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
         try pair.cacheTls13CertificateMessage(allocator);
+        try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
     }
 
@@ -231,8 +238,21 @@ pub const CertKeyPair = struct {
         c.tls13_certificate_msg = try buildTls13CertificateMessage(allocator, c.bundle);
     }
 
+    pub fn cacheEcdsaP256W7Table(c: *CertKeyPair, allocator: mem.Allocator) !void {
+        if (c.ecdsa_p256_w7_table != null) return;
+        const kp = c.ecdsa_key_pair orelse return;
+        switch (kp) {
+            .ecdsa_secp256r1_sha256 => |key_pair| {
+                if (!nistz_p256.enabled) return;
+                c.ecdsa_p256_w7_table = try ecdsa_p256.W7Table.create(allocator, key_pair.public_key.p);
+            },
+            else => {},
+        }
+    }
+
     pub fn deinit(c: *CertKeyPair, allocator: mem.Allocator) void {
         if (c.tls13_certificate_msg.len != 0) allocator.free(c.tls13_certificate_msg);
+        if (c.ecdsa_p256_w7_table) |w7| ecdsa_p256.W7Table.deinit(allocator, w7);
         c.bundle.deinit(allocator);
     }
 
@@ -524,6 +544,9 @@ pub const CertificateParser = struct {
     /// Parsed leaf public keys (avoid re-parsing SEC1/DER on CertificateVerify).
     ecdsa_p256_pk: ?EcdsaP256Sha256.PublicKey = null,
     ecdsa_p256_mul_pc: ?[9]@import("crypto/p256.zig").AffineCoordinates = null,
+    borrowed_ecdsa_p256_w7_table: ?*const ecdsa_p256.W7Table = null,
+    owned_ecdsa_p256_w7_table: ?*ecdsa_p256.W7Table = null,
+    table_allocator: ?mem.Allocator = null,
     ecdsa_p384_pk: ?EcdsaP384Sha384.PublicKey = null,
     ed25519_pk: ?crypto.sign.Ed25519.PublicKey = null,
     rsa_pk: ?rsa.PublicKey = null,
@@ -747,13 +770,33 @@ pub const CertificateParser = struct {
         h.signature = try dupe(&h.signature_buf, try d.slice(try d.decode(u16)));
     }
 
+    fn ecdsaP256W7Rows(h: *const CertificateParser) ?*const ecdsa_p256.TableRows {
+        if (h.borrowed_ecdsa_p256_w7_table) |t| return t.rowsPtr();
+        if (h.owned_ecdsa_p256_w7_table) |t| return t.rowsPtr();
+        return null;
+    }
+
+    fn cacheEcdsaP256W7Table(h: *CertificateParser) !void {
+        if (!nistz_p256.enabled) return;
+        const pk = h.ecdsa_p256_pk orelse return;
+        if (h.borrowed_ecdsa_p256_w7_table) |borrowed| {
+            if (borrowed.matchesPublicKey(pk.p)) return;
+        }
+        if (h.owned_ecdsa_p256_w7_table) |owned| {
+            if (owned.matchesPublicKey(pk.p)) return;
+        }
+        if (h.table_allocator) |alloc| {
+            h.owned_ecdsa_p256_w7_table = try ecdsa_p256.W7Table.create(alloc, pk.p);
+        }
+    }
+
     fn cacheParsedPublicKey(h: *CertificateParser) !void {
         switch (h.pub_key_algo) {
             .X9_62_id_ecPublicKey => |curve| switch (curve) {
                 .X9_62_prime256v1 => {
                     h.ecdsa_p256_pk = try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
                     h.ecdsa_p256_mul_pc = try ecdsa_p256.P256.precomputeMulPublicAffine(h.ecdsa_p256_pk.?.p);
-                    if (nistz_p256.enabled) _ = nistz_p256.mulPublicTableFor(h.ecdsa_p256_pk.?.p);
+                    try h.cacheEcdsaP256W7Table();
                 },
                 .secp384r1 => h.ecdsa_p384_pk = try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key),
                 else => {},
@@ -781,7 +824,7 @@ pub const CertificateParser = struct {
                     .server => transcript.serverCertificateVerifyDigest(&digest),
                     .client => transcript.clientCertificateVerifyDigest(&digest),
                 }
-                try ecdsa_p256.verifyPrehashed(sig, digest, key, if (h.ecdsa_p256_mul_pc) |*pc| pc else null);
+                try ecdsa_p256.verifyPrehashed(sig, digest, key, if (h.ecdsa_p256_mul_pc) |*pc| pc else null, h.ecdsaP256W7Rows());
             },
             .ecdsa_secp384r1_sha384 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
@@ -814,7 +857,7 @@ pub const CertificateParser = struct {
                 const sig = try ecdsa_p256.signatureFromDerTls(h.signature);
                 var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
                 crypto.hash.sha2.Sha256.hash(verify_bytes, &digest, .{});
-                try ecdsa_p256.verifyPrehashed(sig, digest, key, if (h.ecdsa_p256_mul_pc) |*pc| pc else null);
+                try ecdsa_p256.verifyPrehashed(sig, digest, key, if (h.ecdsa_p256_mul_pc) |*pc| pc else null, h.ecdsaP256W7Rows());
             },
             .ecdsa_secp384r1_sha384 => {
                 if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;

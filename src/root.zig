@@ -96,6 +96,7 @@ pub const config = struct {
     pub const Record = @import("record.zig").Record;
     pub const cert = common.cert;
     pub const CertKeyPair = common.CertKeyPair;
+    pub const W7Table = @import("crypto/ecdsa_p256.zig").W7Table;
 
     pub const cipher_suites = @import("cipher.zig").cipher_suites;
     pub const key_log = @import("key_log.zig");
