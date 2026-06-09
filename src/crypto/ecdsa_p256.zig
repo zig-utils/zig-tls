@@ -4,6 +4,7 @@ const crypto = std.crypto;
 
 const p256 = @import("p256.zig");
 const nistz_base = @import("p256_nistz.zig");
+pub const nistz = nistz_base;
 pub const W7Table = nistz_base.W7Table;
 pub const TableRows = nistz_base.TableRows;
 pub const P256 = p256.P256;

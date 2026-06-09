@@ -23,6 +23,9 @@ pub const output_buffer_len = @import("cipher.zig").max_encrypted_record_len; //
 
 pub const Connection = @import("connection.zig").Connection;
 
+/// P-256 ECDSA (CertificateVerify hot path, bench micro-benchmarks).
+pub const ecdsa_p256 = @import("crypto/ecdsa_p256.zig");
+
 /// Low-level RSA primitives (PKCS#1 v1.5 / PSS sign+verify, public/private key
 /// parsing incl. SPKI). Exposed so consumers can do RSA outside the TLS
 /// handshake — e.g. DKIM signing/verification.

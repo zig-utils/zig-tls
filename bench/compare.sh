@@ -18,7 +18,7 @@ BORINGSSL_BENCH="${BENCH_OUT}/boringssl_bench"
 
 echo "=== zig-tls (ReleaseFast, -Dcpu=native) ==="
 ZIG_CACHE="${ZIG_CACHE:-$ROOT/.zig-cache}"
-"$ZIG" build bench -Doptimize=ReleaseFast -Dcpu=native --cache-dir "$ZIG_CACHE" 2>/dev/null | tail -8
+"$ZIG" build bench -Doptimize=ReleaseFast -Dcpu=native --cache-dir "$ZIG_CACHE" 2>/dev/null | tail -20
 
 if [[ ! -f "${BORINGSSL_BUILD}/libssl.a" ]]; then
   echo ""

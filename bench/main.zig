@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const tls = @import("tls");
 const certs = @import("certs.zig");
+const crypto_bench = @import("crypto_bench.zig");
 
 pub const std_options: std.Options = .{
     .log_level = if (builtin.mode == .Debug) .warn else .err,
@@ -61,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
 
     const server_w7 = cert_key.ecdsa_p256_w7_table;
 
-    try benchHandshake(init.io, stdout, allocator, server_w7, bench_server_opt, "handshake TLS 1.3 (minimal ECDHE)");
+    _ = try benchHandshake(init.io, stdout, allocator, server_w7, bench_server_opt, "handshake TLS 1.3 (minimal ECDHE)");
     const cert_server_opt = tls.config.Server{
         .auth = &cert_key,
         .cipher_suites = bench_cipher_128,
@@ -70,10 +71,12 @@ pub fn main(init: std.process.Init) !void {
         .min_version = .tls_1_3,
         .max_version = .tls_1_3,
     };
-    try benchHandshake(init.io, stdout, allocator, server_w7, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert)");
+    const cert_hs_rate = try benchHandshake(init.io, stdout, allocator, server_w7, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert)");
 
     const verify_client_opt = benchClientOpt(allocator, server_w7, cert_key.bundle, false);
-    try benchHandshakeVerify(init.io, stdout, verify_client_opt, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert + verify)");
+    const verify_hs_rate = try benchHandshakeVerify(init.io, stdout, verify_client_opt, cert_server_opt, "handshake TLS 1.3 (ECDHE + cert + verify)");
+
+    try crypto_bench.run(init.io, stdout, allocator, &cert_key, cert_hs_rate, verify_hs_rate);
 
     try benchTransfer(init.io, stdout, allocator, server_w7, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto send (AES-128)");
     try benchTransferRecv(init.io, stdout, allocator, server_w7, bench_cipher_128, .AES_128_GCM_SHA256, "transfer TLS 1.3 record crypto recv (AES-128)");
@@ -105,12 +108,12 @@ fn benchHandshake(
     server_w7: ?*const tls.config.W7Table,
     server_opt: tls.config.Server,
     label: []const u8,
-) !void {
+) !f64 {
     const client_opt = benchClientOpt(allocator, server_w7, .empty, true);
-    try benchHandshakeVerify(io, w, client_opt, server_opt, label);
+    return try benchHandshakeVerify(io, w, client_opt, server_opt, label);
 }
 
-fn benchHandshakeVerify(io: Io, w: anytype, client_opt: tls.config.Client, server_opt: tls.config.Server, label: []const u8) !void {
+fn benchHandshakeVerify(io: Io, w: anytype, client_opt: tls.config.Client, server_opt: tls.config.Server, label: []const u8) !f64 {
     var cli = tls.nonblock.Client.init(client_opt);
     var srv = tls.nonblock.Server.init(server_opt);
     try pumpHandshake(&cli, &srv);
@@ -128,6 +131,7 @@ fn benchHandshakeVerify(io: Io, w: anytype, client_opt: tls.config.Client, serve
     const handshakes_per_sec = @as(f64, @floatFromInt(iterations)) /
         (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s)));
     try w.print("{s:<50} {d:>10.2} /s\n", .{ label, handshakes_per_sec });
+    return handshakes_per_sec;
 }
 
 fn benchRecordCryptoSend(
