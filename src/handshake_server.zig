@@ -780,14 +780,12 @@ pub const Handshake = struct {
             var ee_msg: [300]u8 = undefined;
             var ee_hw = record.Writer.init(&ee_msg);
             try ee_hw.handshakeRecord(.encrypted_extensions, ee_w.buffered());
-            h.transcript.update(ee_hw.buffered());
             try appendMsg(&flight_buf, &flight_len, ee_hw.buffered());
 
             if (opt.client_auth) |_| {
                 var cr_msg: [512]u8 = undefined;
                 var cr_hw = record.Writer.init(&cr_msg);
                 try makeCertificateRequest(&cr_hw);
-                h.transcript.update(cr_hw.buffered());
                 try appendMsg(&flight_buf, &flight_len, cr_hw.buffered());
             }
             if (opt.auth) |auth| {
@@ -799,20 +797,23 @@ pub const Handshake = struct {
                 var cert_msg: [1024]u8 = undefined;
                 var cert_hw = record.Writer.init(&cert_msg);
                 try cb.makeCertificate(&cert_hw);
-                h.transcript.update(cert_hw.buffered());
                 try appendMsg(&flight_buf, &flight_len, cert_hw.buffered());
+                h.transcript.update(flight_buf[0..flight_len]);
 
                 var cv_msg: [512]u8 = undefined;
                 var cv_hw = record.Writer.init(&cv_msg);
                 try cb.makeCertificateVerify(&cv_hw);
-                h.transcript.update(cv_hw.buffered());
                 try appendMsg(&flight_buf, &flight_len, cv_hw.buffered());
+                h.transcript.update(cv_hw.buffered());
+            } else if (flight_len > 0) {
+                h.transcript.update(flight_buf[0..flight_len]);
             }
+
             var fin_msg: [64]u8 = undefined;
             var fin_hw = record.Writer.init(&fin_msg);
             try fin_hw.handshakeRecord(.finished, h.transcript.serverFinishedTls13());
-            h.transcript.update(fin_hw.buffered());
             try appendMsg(&flight_buf, &flight_len, fin_hw.buffered());
+            h.transcript.update(fin_hw.buffered());
 
             var hw = try w.writerAdvance(record.header_len);
             try hw.slice(flight_buf[0..flight_len]);
@@ -848,6 +849,7 @@ pub const Handshake = struct {
                     var d = record.Decoder.init(.handshake, cleartext[cleartext_off..]);
                     try d.expectContentType(.handshake);
                     while (!d.eof()) {
+                        const transcript_start = cleartext_off;
                         const handshake_type = try d.decode(proto.Handshake);
                         const length = try d.decode(u24);
 
@@ -855,12 +857,6 @@ pub const Handshake = struct {
                             return error.TlsRecordOverflow;
                         if (length > d.rest().len)
                             continue :outer; // fragmented handshake into multiple records
-
-                        defer {
-                            h.transcript.update(cleartext[cleartext_off .. cleartext_off + d.idx]);
-                            cleartext_off += d.idx;
-                            d = record.Decoder.init(.handshake, cleartext[cleartext_off..]);
-                        }
 
                         if (handshake_state != handshake_type)
                             return error.TlsUnexpectedMessage;
@@ -894,10 +890,15 @@ pub const Handshake = struct {
                                         error.TlsDecryptError
                                     else
                                         error.TlsDecodeError;
+                                cleartext_off += d.idx;
+                                h.transcript.update(cleartext[transcript_start..cleartext_off]);
                                 return;
                             },
                             else => return error.TlsUnexpectedMessage,
                         }
+                        cleartext_off += d.idx;
+                        h.transcript.update(cleartext[transcript_start..cleartext_off]);
+                        d = record.Decoder.init(.handshake, cleartext[cleartext_off..]);
                     }
                 },
                 .alert => {

@@ -640,7 +640,7 @@ pub fn mulBaseVarTimeX(s: [32]u8) Fe {
         return (mulBaseBedrockC(s) catch unreachable).xCoordVarTime();
     }
     if (!@inComptime() and coord.hw.enabled and use_bedrock_mul_base) {
-        return (mulBaseJacobian(s) catch unreachable).xCoordVarTime();
+        return mulBaseJacobianVarTimeX(s);
     }
     return mulAffineTableVarTimeX(s, &table.ecp_nistz256_precomputed);
 }
@@ -652,18 +652,31 @@ fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
 }
 
 fn mulBaseJacobian(s: [32]u8) IdentityElementError!P256 {
+    const w = precomputeW7Windows(s);
     var ret_is_zero = true;
     var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
     const one_z = montgomeryOne();
 
-    var i: isize = 36;
-    while (i >= 0) : (i -= 1) {
-        const row_i: usize = @intCast(i);
-        const wvalue = boothRecodeW7(loadWindow(s, row_i));
-        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table.ecp_nistz256_precomputed[row_i], row_i, wvalue);
+    inline for (0..37) |step| {
+        const row_i = 36 - step;
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table.ecp_nistz256_precomputed[row_i], row_i, w[row_i]);
     }
 
     return jacobianToP256(acc);
+}
+
+fn mulBaseJacobianVarTimeX(s: [32]u8) Fe {
+    const w = precomputeW7Windows(s);
+    var ret_is_zero = true;
+    var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
+    const one_z = montgomeryOne();
+
+    inline for (0..37) |step| {
+        const row_i = 36 - step;
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table.ecp_nistz256_precomputed[row_i], row_i, w[row_i]);
+    }
+
+    return jacobianXCoord(acc);
 }
 
 fn mulBaseBedrockC(s: [32]u8) IdentityElementError!P256 {
