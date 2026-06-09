@@ -11,16 +11,24 @@ const coord = @import("p256_coord.zig");
 const field_inv_sqr = @import("p256/field_inv_sqr_chain.zig");
 const fiat = @import("p256_fiat_hw.zig");
 const bedrock_c = @import("bedrock_c_enabled.zig");
+const wnaf = @import("p256_wnaf.zig");
+const g_precomp = @import("p256_g_precomp.zig");
 
 pub const enabled = builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64;
 pub const TableRows = [37]table.Row;
+
+/// BoringSSL `point_mul_public` interleaved wNAF (experimental; slower than w7 Shamir here).
+pub const use_wnaf_mul_public = false;
 
 const IdentityElementError = crypto.errors.IdentityElementError;
 
 const Jacobian = [3]coord.Coord;
 
-/// Bedrock Jacobian w7 accumulation for ECDSA verify (faster than projective on AArch64).
+/// Bedrock Jacobian w7 accumulation for pubkey table build on AArch64.
 pub const use_bedrock_verify_accum = coord.hw.enabled;
+
+/// Jacobian unified w7 double-base verify (faster than projective on AArch64).
+pub const use_jacobian_double_base = use_bedrock_verify_accum;
 
 fn feFromMontgomeryLimbs(limbs: [4]u64) Fe {
     return .{ .limbs = limbs };
@@ -30,6 +38,12 @@ fn montgomeryOne() coord.Coord {
     var one: coord.Coord = undefined;
     fiat.setOne(&one);
     return one;
+}
+
+fn precomputeW7Windows(s: [32]u8) [37]u64 {
+    var w: [37]u64 = undefined;
+    for (0..37) |row_i| w[row_i] = boothRecodeW7(loadWindow(s, row_i));
+    return w;
 }
 
 fn loadWindow(s: [32]u8, i: usize) u64 {
@@ -341,15 +355,16 @@ fn mulDoubleBaseJacobianFromTables(
     if (!@inComptime() and bedrock_c.enabled)
         return mulDoubleBaseBedrockC(s1, s2, table2);
 
+    const w1 = precomputeW7Windows(s1);
+    const w2 = precomputeW7Windows(s2);
     var ret_is_zero = true;
     var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
     const one_z = montgomeryOne();
 
-    var i: isize = 36;
-    while (i >= 0) : (i -= 1) {
-        const row_i: usize = @intCast(i);
-        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table1[row_i], row_i, boothRecodeW7(loadWindow(s1, row_i)));
-        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table2[row_i], row_i, boothRecodeW7(loadWindow(s2, row_i)));
+    inline for (0..37) |step| {
+        const row_i = 36 - step;
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table1[row_i], row_i, w1[row_i]);
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table2[row_i], row_i, w2[row_i]);
     }
 
     return acc;
@@ -362,7 +377,7 @@ pub fn mulDoubleBaseVarTimeFromTables(
     table1: *const TableRows,
     table2: *const TableRows,
 ) P256 {
-    if (!use_bedrock_verify_accum) return mulDoubleBaseProjectiveFromTables(s1, s2, table1, table2);
+    if (!use_jacobian_double_base) return mulDoubleBaseProjectiveFromTables(s1, s2, table1, table2);
     const acc = mulDoubleBaseJacobianFromTables(s1, s2, table1, table2);
     return jacobianToP256(acc) catch unreachable;
 }
@@ -374,7 +389,7 @@ pub fn mulDoubleBaseVarTimeXFromTables(
     table1: *const TableRows,
     table2: *const TableRows,
 ) Fe {
-    if (!use_bedrock_verify_accum) {
+    if (!use_jacobian_double_base) {
         const p = mulDoubleBaseProjectiveFromTables(s1, s2, table1, table2);
         return p.xCoordVarTime();
     }
@@ -382,20 +397,115 @@ pub fn mulDoubleBaseVarTimeXFromTables(
     return jacobianXCoord(acc);
 }
 
+fn buildPubWnafPrecompAffine(p: P256) [8]p256.AffineCoordinates {
+    var pre: [8]P256 = undefined;
+    pre[0] = p;
+    const p2 = p.dbl();
+    var i: usize = 1;
+    while (i < 8) : (i += 1) pre[i] = pre[i - 1].add(p2);
+    var out: [8]p256.AffineCoordinates = undefined;
+    for (&pre, &out) |*pt, *a| a.* = pt.affineCoordinatesVarTime();
+    return out;
+}
+
+fn accumulateGWindowProjective(
+    acc: *P256,
+    ret_is_zero: *bool,
+    g_scalar: [32]u8,
+    i: isize,
+) void {
+    if (i > 31) return;
+    var j: isize = 1;
+    while (j >= 0) : (j -= 1) {
+        var bits: u64 = 0;
+        var k: isize = 3;
+        while (k >= 0) : (k -= 1) {
+            if (wnaf.scalarBit(g_scalar, @intCast(i + j * 32 + k * 64)))
+                bits |= @as(u64, 1) << @intCast(k);
+        }
+        if (bits == 0) continue;
+        const pt = g_precomp.g_pre_comp[@intCast(j)][@intCast(bits - 1)];
+        const qx = feFromMontgomeryLimbs(pt[0]);
+        const qy = feFromMontgomeryLimbs(pt[1]);
+        if (!ret_is_zero.*) {
+            acc.* = acc.addMixedVarTime(.{ .x = qx, .y = qy });
+        } else {
+            acc.* = .{ .x = qx, .y = qy, .z = Fe.one };
+            ret_is_zero.* = false;
+        }
+    }
+}
+
+fn accumulatePWnafDigitProjective(
+    acc: *P256,
+    ret_is_zero: *bool,
+    p_pre_affine: *const [8]p256.AffineCoordinates,
+    digit: i8,
+) void {
+    if (digit == 0) return;
+    const mag: usize = @intCast(@as(u32, @intCast(if (digit < 0) -digit else digit)) >> 1);
+    var aff = p_pre_affine[mag];
+    if (digit < 0) aff.y = aff.y.neg();
+    if (!ret_is_zero.*) {
+        acc.* = acc.addMixedVarTime(aff);
+    } else {
+        acc.* = .{ .x = aff.x, .y = aff.y, .z = Fe.one };
+        ret_is_zero.* = false;
+    }
+}
+
+/// BoringSSL `ec_GFp_nistp256_point_mul_public` (g_scalar·G + p_scalar·Q).
+pub fn mulDoubleBaseVarTimePublicWnaf(g_scalar: [32]u8, p: P256, p_scalar: [32]u8) P256 {
+    var p_wnaf: [257]i8 = undefined;
+    wnaf.computeWnaf(&p_wnaf, p_scalar, 256, 4);
+    const p_pre = buildPubWnafPrecompAffine(p);
+
+    var ret_is_zero = true;
+    var acc = P256.identityElement;
+
+    var i: isize = 256;
+    while (i >= 0) : (i -= 1) {
+        if (!ret_is_zero) acc = acc.dbl();
+        accumulateGWindowProjective(&acc, &ret_is_zero, g_scalar, i);
+        accumulatePWnafDigitProjective(&acc, &ret_is_zero, &p_pre, p_wnaf[@intCast(i)]);
+    }
+    return acc;
+}
+
+/// `point_mul_public` returning affine x only (ECDSA verify hot path).
+pub fn mulDoubleBaseVarTimeXPublicWnaf(g_scalar: [32]u8, p: P256, p_scalar: [32]u8) Fe {
+    return mulDoubleBaseVarTimePublicWnaf(g_scalar, p, p_scalar).xCoordVarTime();
+}
+
+pub fn mulDoubleBaseVarTimeXPublicWnafBedrockC(g_scalar: [32]u8, p: P256, p_scalar: [32]u8) Fe {
+    const mul = @extern(
+        *const fn (out: *[3][4]u64, g_scalar: *const [32]u8, p_in: *const [3][4]u64, p_scalar: *const [32]u8) callconv(.c) void,
+        .{ .name = "p256_bedrock_point_mul_public" },
+    );
+    var j: [3][4]u64 = undefined;
+    const pj = p256ToJacobian(p);
+    mul(&j, &g_scalar, &pj, &p_scalar);
+    return jacobianXCoord(.{ j[0], j[1], j[2] });
+}
+
+/// Bedrock C `point_mul_public` when `-Dbedrock-c-mul-base=true`.
+pub const use_bedrock_mul_public_c = false;
+
 fn mulDoubleBaseProjectiveFromTables(
     s1: [32]u8,
     s2: [32]u8,
     table1: *const TableRows,
     table2: *const TableRows,
 ) P256 {
+    const w1 = precomputeW7Windows(s1);
+    const w2 = precomputeW7Windows(s2);
     var ret_is_zero = true;
     var acc = P256.identityElement;
 
-    var i: isize = 36;
-    while (i >= 0) : (i -= 1) {
-        const row_i: usize = @intCast(i);
-        accumulateW7WindowProjective(&acc, &ret_is_zero, table1[row_i], row_i, boothRecodeW7(loadWindow(s1, row_i)));
-        accumulateW7WindowProjective(&acc, &ret_is_zero, table2[row_i], row_i, boothRecodeW7(loadWindow(s2, row_i)));
+    inline for (0..37) |step| {
+        const row_i = 36 - step;
+        accumulateW7WindowProjective(&acc, &ret_is_zero, table1[row_i], row_i, w1[row_i]);
+        accumulateW7WindowProjective(&acc, &ret_is_zero, table2[row_i], row_i, w2[row_i]);
     }
 
     return acc;
@@ -535,6 +645,25 @@ test "batch table row matches per-entry affine conversion" {
             acc = out;
         }
     }
+}
+
+test "mulDoubleBaseVarTimePublicWnaf matches w7 Shamir" {
+    if (!enabled) return error.SkipZigTest;
+    const q_pc = buildPrecomputedTable(P256.basePoint);
+    const s1: [32]u8 = @splat(0x11);
+    const s2: [32]u8 = @splat(0x22);
+    const wnaf_p = mulDoubleBaseVarTimePublicWnaf(s1, P256.basePoint, s2);
+    const shamir = mulDoubleBaseVarTimeFromTables(s1, s2, basePrecomputedTable(), &q_pc);
+    try std.testing.expect(wnaf_p.equivalent(shamir));
+}
+
+test "mulDoubleBaseVarTimeXPublicWnaf matches split mul" {
+    if (!enabled) return error.SkipZigTest;
+    const s1: [32]u8 = @splat(0x11);
+    const s2: [32]u8 = @splat(0x33);
+    const x = mulDoubleBaseVarTimeXPublicWnaf(s1, P256.basePoint, s2);
+    const split = mulBaseVarTime(s1).add(mulPublicVarTimeFromTable(s2, &buildPrecomputedTable(P256.basePoint)));
+    try std.testing.expect(x.equivalent(split.xCoordVarTime()));
 }
 
 test "mulDoubleBaseVarTimeXFromTables matches full point" {
