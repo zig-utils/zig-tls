@@ -1,7 +1,7 @@
 .{
     .name = .zig_tls,
     .version = "0.1.1",
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.17.0-dev.56+a8226cd53",
     .fingerprint = 0x114f7e81e404070b,
     .dependencies = .{},
     .paths = .{

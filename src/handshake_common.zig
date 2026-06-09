@@ -251,7 +251,9 @@ pub const CertKeyPair = struct {
 
     pub fn cacheTls13CertificateMessage(c: *CertKeyPair, allocator: mem.Allocator) !void {
         if (c.bundle.map.size == 0) return;
-        c.tls13_certificate_msg = try buildTls13CertificateMessage(allocator, c.bundle);
+        const msg = try buildTls13CertificateMessage(allocator, c.bundle);
+        if (c.tls13_certificate_msg.len != 0) allocator.free(c.tls13_certificate_msg);
+        c.tls13_certificate_msg = msg;
     }
 
     pub fn cacheEcdsaP256W7Table(c: *CertKeyPair, allocator: mem.Allocator) !void {
@@ -866,6 +868,15 @@ pub const CertificateParser = struct {
         return null;
     }
 
+    /// Free the heap-owned P-256 verify table, if any. Safe to call when no
+    /// `table_allocator` was set (no-op). Does not touch a borrowed table.
+    pub fn deinit(h: *CertificateParser) void {
+        if (h.table_allocator) |alloc| {
+            if (h.owned_ecdsa_p256_w7_table) |t| ecdsa_p256.W7Table.deinit(alloc, t);
+        }
+        h.owned_ecdsa_p256_w7_table = null;
+    }
+
     fn cacheEcdsaP256W7Table(h: *CertificateParser) !void {
         if (!nistz_p256.enabled) return;
         const pk = h.ecdsa_p256_pk orelse return;
@@ -876,7 +887,11 @@ pub const CertificateParser = struct {
             if (owned.matchesPublicKey(pk.p)) return;
         }
         if (h.table_allocator) |alloc| {
-            h.owned_ecdsa_p256_w7_table = try ecdsa_p256.W7Table.create(alloc, pk.p);
+            // Build the new table before freeing the stale one so an allocation
+            // failure leaves the existing table intact.
+            const table = try ecdsa_p256.W7Table.create(alloc, pk.p);
+            if (h.owned_ecdsa_p256_w7_table) |old| ecdsa_p256.W7Table.deinit(alloc, old);
+            h.owned_ecdsa_p256_w7_table = table;
         }
     }
 

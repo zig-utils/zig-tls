@@ -483,7 +483,10 @@ pub const Handshake = struct {
 
     /// TLS 1.3 cipher used during handshake
     fn generateHandshakeCipher(h: *Self, key_log_callback: ?key_log.Callback) !void {
-        const shared_key = try h.dh_kp.sharedKey(h.named_group.?, h.server_pub_key);
+        // A compliant TLS 1.3 ServerHello must carry a key_share; reject (don't panic)
+        // if a malicious/broken server omitted it.
+        const named_group = h.named_group orelse return error.TlsIllegalParameter;
+        const shared_key = try h.dh_kp.sharedKey(named_group, h.server_pub_key);
         const handshake_secret = h.transcript.handshakeSecret(shared_key);
         if (key_log_callback) |cb| {
             cb(key_log.label.server_handshake_traffic_secret, &h.client_random, handshake_secret.server);
@@ -1205,6 +1208,12 @@ test "parse tls 1.3 server hello" {
     try testing.expectEqualSlices(u8, &data13.server_pub_key, h.server_pub_key);
 }
 
+test "tls 1.3 server hello without key_share is rejected, not a panic" {
+    var h: Handshake = undefined;
+    h.named_group = null;
+    try testing.expectError(error.TlsIllegalParameter, h.generateHandshakeCipher(null));
+}
+
 test "init tls 1.3 handshake cipher" {
     const cipher_suite_tag: CipherSuite = .AES_256_GCM_SHA384;
 
@@ -1426,6 +1435,13 @@ pub const NonBlock = struct {
             .opt = opt,
             .state = .init,
         };
+    }
+
+    /// Release any heap state owned by the handshake (the optional P-256 verify
+    /// table allocated from `opt.table_allocator`). No-op when `table_allocator`
+    /// is unset. Call once when the client is no longer needed.
+    pub fn deinit(self: *Self) void {
+        self.inner.cert.deinit();
     }
 
     /// Start a new handshake reusing `opt` and any cached certificate state.
