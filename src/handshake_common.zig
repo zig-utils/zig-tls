@@ -324,6 +324,17 @@ pub const cert = struct {
     }
 };
 
+fn signEcdsaP256Tls(
+    key_pair: EcdsaP256Sha256.KeyPair,
+    digest: [crypto.hash.sha2.Sha256.digest_length]u8,
+    cached_d: ?ecdsa_p256.P256.scalar.Scalar,
+) (crypto.errors.IdentityElementError || crypto.errors.NonCanonicalError)!EcdsaP256Sha256.Signature {
+    if (cached_d) |d| {
+        return ecdsa_p256.signCertificateVerifyTls(key_pair.secret_key.bytes, digest, d);
+    }
+    return ecdsa_p256.signPrehashed(key_pair, digest, null, null);
+}
+
 pub const CertificateBuilder = struct {
     cert_key_pair: *CertKeyPair,
     transcript: *Transcript,
@@ -387,7 +398,7 @@ pub const CertificateBuilder = struct {
                         });
                         const digest = hash_state.finalResult();
                         break :blk if (comptime_scheme == .ecdsa_secp256r1_sha256)
-                            try ecdsa_p256.signPrehashed(key_pair, digest, null, h.cert_key_pair.ecdsa_p256_d)
+                            try signEcdsaP256Tls(key_pair, digest, h.cert_key_pair.ecdsa_p256_d)
                         else
                             try key_pair.signPrehashed(digest, null);
                     },
@@ -410,7 +421,7 @@ pub const CertificateBuilder = struct {
                             else => unreachable,
                         }
                         break :blk if (comptime_scheme == .ecdsa_secp256r1_sha256)
-                            try ecdsa_p256.signPrehashed(key_pair, digest, null, h.cert_key_pair.ecdsa_p256_d)
+                            try signEcdsaP256Tls(key_pair, digest, h.cert_key_pair.ecdsa_p256_d)
                         else
                             try key_pair.signPrehashed(digest, null);
                     },

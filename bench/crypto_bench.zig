@@ -21,8 +21,8 @@ pub fn run(
     const server_w7 = w7.rowsPtr();
 
     const digest: [32]u8 = @splat(0xaa);
-    const sign_scalar = cert_key.ecdsa_p256_d;
-    const sig = try ecdsa.signPrehashed(kp, digest, null, sign_scalar);
+    const sign_scalar = cert_key.ecdsa_p256_d orelse return;
+    const sig = try ecdsa.signCertificateVerifyTls(kp.secret_key.bytes, digest, sign_scalar);
     const pk = kp.public_key;
     const v1: [32]u8 = @splat(0x11);
     const v2: [32]u8 = @splat(0x42);
@@ -115,12 +115,12 @@ pub fn run(
     const sign_rate = blk: {
         i = 0;
         while (i < 64) : (i += 1) {
-            _ = try ecdsa.signPrehashed(kp, digest, null, sign_scalar);
+            _ = try ecdsa.signCertificateVerifyTls(kp.secret_key.bytes, digest, sign_scalar);
         }
         start = Io.Clock.awake.now(io).nanoseconds;
         i = 0;
         while (i < crypto_iterations / 10) : (i += 1) {
-            _ = try ecdsa.signPrehashed(kp, digest, null, sign_scalar);
+            _ = try ecdsa.signCertificateVerifyTls(kp.secret_key.bytes, digest, sign_scalar);
         }
         break :blk rate(crypto_iterations / 10, Io.Clock.awake.now(io).nanoseconds - start);
     };

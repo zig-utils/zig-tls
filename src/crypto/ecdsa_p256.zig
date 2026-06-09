@@ -106,6 +106,28 @@ fn deterministicScalar(
     }
 }
 
+/// CertificateVerify sign with cached private scalar (TLS 1.3 server hot path).
+pub fn signCertificateVerifyTls(
+    secret_key: scalar.CompressedScalar,
+    msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8,
+    d: scalar.Scalar,
+) (IdentityElementError || NonCanonicalError)!Signature {
+    const z = hashToScalar(msg_hash);
+    const k = deterministicScalarNoiseless(msg_hash, secret_key);
+    const k_le = Fe.orderSwap(k.toBytes(.big));
+    const x_fe = if (nistz_base.enabled)
+        nistz_base.mulBaseVarTimeX(k_le)
+    else
+        (try P256.basePoint.mul(k.toBytes(.big), .big)).xCoordVarTime();
+    const r = feBytesToScalar(x_fe.toBytes(.big));
+    if (r.isZero()) return error.IdentityElement;
+
+    const s = k.invertVarTime().mul(z.add(r.mul(d)));
+    if (s.isZero()) return error.IdentityElement;
+
+    return Signature{ .r = r.toBytes(.big), .s = s.toBytes(.big) };
+}
+
 /// Fast TLS CertificateVerify sign: nistz mulBase, x-only affine, var-time scalar invert.
 pub fn signPrehashed(
     key_pair: EcdsaP256Sha256.KeyPair,
@@ -234,6 +256,20 @@ test "deterministicScalarNoiseless matches deterministicScalar" {
     const a = deterministicScalarNoiseless(digest, kp.secret_key.bytes);
     const b = deterministicScalar(digest, kp.secret_key.bytes, null);
     try std.testing.expect(a.equivalent(b));
+}
+
+test "signCertificateVerifyTls matches signPrehashed" {
+    var seed: [EcdsaP256Sha256.KeyPair.seed_length]u8 = undefined;
+    @memset(&seed, 0x42);
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const d = try scalar.Scalar.fromBytes(kp.secret_key.bytes, .big);
+    const msg = "TLS 1.3, server CertificateVerify";
+    var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    crypto.hash.sha2.Sha256.hash(msg, &digest, .{});
+    const a = try signCertificateVerifyTls(kp.secret_key.bytes, digest, d);
+    const b = try signPrehashed(kp, digest, null, d);
+    try std.testing.expectEqualSlices(u8, &a.r, &b.r);
+    try std.testing.expectEqualSlices(u8, &a.s, &b.s);
 }
 
 test "signPrehashed matches std signPrehashed" {
