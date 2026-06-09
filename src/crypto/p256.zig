@@ -512,11 +512,14 @@ pub const P256 = struct {
         const s1 = if (endian == .little) s1_ else Fe.orderSwap(s1_);
         const s2 = if (endian == .little) s2_ else Fe.orderSwap(s2_);
         if (p1.is_base and nistz_base.enabled) {
-            const term1 = nistz_base.mulBaseVarTime(s1);
             try p2.rejectIdentity();
-            const w7 = nistz_base.mulPublicTableFor(p2);
-            const term2 = nistz_base.mulPublicVarTimeFromTable(s2, w7);
-            return term1.add(term2);
+            const q_table = nistz_base.mulPublicTableFor(p2);
+            return nistz_base.mulDoubleBaseVarTimeFromTables(
+                s1,
+                s2,
+                nistz_base.basePrecomputedTable(),
+                q_table,
+            );
         }
         try p1.rejectIdentity();
         var pc1_array: [9]P256 = undefined;

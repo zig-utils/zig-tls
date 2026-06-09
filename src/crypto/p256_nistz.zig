@@ -125,15 +125,11 @@ pub fn buildPrecomputedTable(p: P256) [37]table.Row {
 
     for (0..37) |row_i| {
         const limit: usize = if (row_i == 36) 16 else 64;
-        var multiples: [64]P256 = undefined;
-        multiples[0] = row_base;
-        var j: usize = 1;
-        while (j < limit) : (j += 1) {
-            multiples[j] = multiples[j - 1].add(row_base);
-        }
+        var acc = row_base;
         for (0..limit) |idx| {
-            const aff = multiples[idx].affineCoordinatesVarTime();
+            const aff = acc.affineCoordinatesVarTime();
             rows[row_i][idx] = .{ .x = aff.x.limbs, .y = aff.y.limbs };
+            acc = acc.add(row_base);
         }
         if (row_i < 36) {
             for (0..7) |_| row_base = row_base.dbl();
@@ -172,6 +168,31 @@ pub fn mulPublicTableFor(p: P256) *const [37]table.Row {
 /// Variable-time k·P using a precomputed w7 table (ECDSA verify hot path).
 pub fn mulPublicVarTimeFromTable(s: [32]u8, precomputed: *const [37]table.Row) P256 {
     return mulAffineTableVarTime(s, precomputed);
+}
+
+/// Base-point w7 table (`k·G`).
+pub fn basePrecomputedTable() *const [37]table.Row {
+    return &table.ecp_nistz256_precomputed;
+}
+
+/// Unified w7 double-base mul (u1·G + u2·Q) for ECDSA verify.
+pub fn mulDoubleBaseVarTimeFromTables(
+    s1: [32]u8,
+    s2: [32]u8,
+    table1: *const [37]table.Row,
+    table2: *const [37]table.Row,
+) P256 {
+    var ret_is_zero = true;
+    var acc = P256.identityElement;
+
+    var i: isize = 36;
+    while (i >= 0) : (i -= 1) {
+        const row_i: usize = @intCast(i);
+        accumulateW7Window(&acc, &ret_is_zero, table1[row_i], row_i, boothRecodeW7(loadWindow(s1, row_i)));
+        accumulateW7Window(&acc, &ret_is_zero, table2[row_i], row_i, boothRecodeW7(loadWindow(s2, row_i)));
+    }
+
+    return acc;
 }
 
 /// Variable-time k*G without identity check (ECDSA sign hot path).
@@ -290,4 +311,14 @@ test "buildPrecomputedTable matches mulPublic" {
         const b = try P256.basePoint.mulPublic(s_be, .big);
         try std.testing.expect(a.equivalent(b));
     }
+}
+
+test "mulDoubleBaseVarTimeFromTables matches split mul" {
+    if (!enabled) return error.SkipZigTest;
+    const q_pc = buildPrecomputedTable(P256.basePoint);
+    const s1: [32]u8 = @splat(0x11);
+    const s2: [32]u8 = @splat(0x22);
+    const unified = mulDoubleBaseVarTimeFromTables(s1, s2, basePrecomputedTable(), &q_pc);
+    const split = mulBaseVarTime(s1).add(mulPublicVarTimeFromTable(s2, &q_pc));
+    try std.testing.expect(unified.equivalent(split));
 }
