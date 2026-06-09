@@ -24,7 +24,9 @@ zig-tls is a Zig TLS 1.2/1.3 implementation with:
 - Bounded record buffers (max 16 KiB cleartext per RFC 8446)
 - Constant-time RSA decryption paths (see `src/rsa/rsa.zig`)
 - No TLS renegotiation (aligned with BoringSSL policy)
-- Fuzz targets for record and handshake parsers (`zig build -Dfuzz=true fuzz`)
+- Fuzz targets for record and handshake parsers (`zig build -Dfuzz=true fuzz`);
+  `tls.fuzz.parseClientHello` / `parseServerHello` drive full handshake parsers
+- In-process interop tests (cert handshake, OCSP staple, 0-RTT, nonblock I/O) in `zig build test`
 
 ## Audit Preparation
 

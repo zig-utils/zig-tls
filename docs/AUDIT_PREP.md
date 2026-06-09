@@ -44,7 +44,11 @@ zig build -Dfuzz=true fuzz   # fuzz binaries in zig-out/bin/
 
 ## Known Limitations (document for auditor)
 
-- OCSP stapling: client may send `status_request`; `Server.ocsp_response` is reserved but not attached to Certificate extensions yet
+- OCSP stapling: server attaches `Server.ocsp_response` to the leaf Certificate
+  `status_request` extension (TLS 1.3); client validates staples when `request_ocsp`
+  is set and certificate verification is enabled (DER shape, successful status,
+  CertID hash/serial match, thisUpdate/nextUpdate); OCSP responder signature
+  verification is not implemented yet
 - TLS 1.2 static RSA key exchange: server decrypt path implemented; legacy export ciphers still unsupported
 - HelloRetryRequest: implemented for preferred-group mismatch; stateless cookie is connection-scoped (16-byte random)
 - 0-RTT early data: client send and server decrypt with PSK binder verification; disabled by default (`Server.max_early_data_size = 0`); set `> 0` to accept early data on PSK resume

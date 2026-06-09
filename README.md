@@ -118,6 +118,7 @@ certificate state (trusted leaf skip-parse, hostname, P-256 verify tables).
 | Hostname verify | on | Set `insecure_skip_verify = true` only in tests |
 | 0-RTT early data | off | `Server.max_early_data_size = 0` |
 | TLS versions | 1.2–1.3 | Pin with `min_version` / `max_version` if needed |
+| OCSP stapling | server send | Set `Server.ocsp_response` (DER); client `request_ocsp = true` |
 
 For legacy TLS 1.2 CBC clients, pass `cipher_suites = tls.config.cipher_suites.tls12`
 (or `.all`) explicitly on both client and server.
