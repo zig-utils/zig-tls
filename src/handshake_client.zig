@@ -1214,6 +1214,29 @@ test "tls 1.3 server hello without key_share is rejected, not a panic" {
     try testing.expectError(error.TlsIllegalParameter, h.generateHandshakeCipher(null));
 }
 
+test "smoke fuzz: parseServerHello tolerates arbitrary input" {
+    // parseServerHello only writes into `h`, so a default-constructed handshake is
+    // safe to drive with hostile bytes. The contract: never panic / never UB on
+    // untrusted input — every malformed record must surface as an error.
+    var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+    const rand = prng.random();
+    var out_buf: [64]u8 = undefined;
+    var writer: Io.Writer = .fixed(&out_buf);
+    var buf: [600]u8 = undefined;
+
+    var iter: usize = 0;
+    while (iter < 20_000) : (iter += 1) {
+        const n = rand.intRangeAtMost(usize, 0, buf.len);
+        rand.bytes(buf[0..n]);
+        var reader: Io.Reader = .fixed(buf[0..n]);
+        var h: Handshake = .{ .input = &reader, .output = &writer };
+        var d = Record.decoder(&reader) catch continue;
+        _ = d.decode(proto.Handshake) catch continue;
+        const length = d.decode(u24) catch continue;
+        h.parseServerHello(&d, length) catch {};
+    }
+}
+
 test "init tls 1.3 handshake cipher" {
     const cipher_suite_tag: CipherSuite = .AES_256_GCM_SHA384;
 
