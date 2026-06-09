@@ -508,18 +508,19 @@ pub const P256 = struct {
         s2_: [32]u8,
         endian: std.builtin.Endian,
         pc2_affine_cached: ?*const [9]AffineCoordinates,
+        pc2_w7_table: ?*const nistz_base.TableRows,
     ) IdentityElementError!P256 {
         const s1 = if (endian == .little) s1_ else Fe.orderSwap(s1_);
         const s2 = if (endian == .little) s2_ else Fe.orderSwap(s2_);
         if (p1.is_base and nistz_base.enabled) {
-            try p2.rejectIdentity();
-            const q_table = nistz_base.mulPublicTableFor(p2);
-            return nistz_base.mulDoubleBaseVarTimeFromTables(
-                s1,
-                s2,
-                nistz_base.basePrecomputedTable(),
-                q_table,
-            );
+            if (pc2_w7_table) |q_table| {
+                return nistz_base.mulDoubleBaseVarTimeFromTables(
+                    s1,
+                    s2,
+                    nistz_base.basePrecomputedTable(),
+                    q_table,
+                );
+            }
         }
         try p1.rejectIdentity();
         var pc1_array: [9]P256 = undefined;
@@ -571,8 +572,9 @@ pub const P256 = struct {
         s2_: [32]u8,
         endian: std.builtin.Endian,
         pc2_affine_cached: ?*const [9]AffineCoordinates,
+        pc2_w7_table: ?*const nistz_base.TableRows,
     ) IdentityElementError!P256 {
-        return mulDoubleBaseVerify(p1, s1_, p2, s2_, endian, pc2_affine_cached);
+        return mulDoubleBaseVerify(p1, s1_, p2, s2_, endian, pc2_affine_cached, pc2_w7_table);
     }
 };
 

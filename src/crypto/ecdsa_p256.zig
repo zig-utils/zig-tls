@@ -4,6 +4,8 @@ const crypto = std.crypto;
 
 const p256 = @import("p256.zig");
 const nistz_base = @import("p256_nistz.zig");
+pub const W7Table = nistz_base.W7Table;
+pub const TableRows = nistz_base.TableRows;
 pub const P256 = p256.P256;
 const AffineCoordinates = p256.AffineCoordinates;
 const Fe = P256.Fe;
@@ -97,6 +99,7 @@ pub fn verifyPrehashed(
     msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8,
     public_key: PublicKey,
     mul_pc: ?*const [9]AffineCoordinates,
+    mul_w7_table: ?*const TableRows,
 ) (IdentityElementError || NonCanonicalError || SignatureVerificationError)!void {
     const r = try scalar.Scalar.fromBytes(sig.r, .big);
     const s = try scalar.Scalar.fromBytes(sig.s, .big);
@@ -108,7 +111,7 @@ pub fn verifyPrehashed(
     const s_inv = s.invertVarTime();
     const v1 = z.mul(s_inv).toBytes(.little);
     const v2 = r.mul(s_inv).toBytes(.little);
-    const sum = try P256.mulDoubleBaseVerify(P256.basePoint, v1, public_key.p, v2, .little, mul_pc);
+    const sum = try P256.mulDoubleBaseVerify(P256.basePoint, v1, public_key.p, v2, .little, mul_pc, mul_w7_table);
     const vr = feBytesToScalar(sum.xCoordVarTime().toBytes(.big));
     if (!r.equivalent(vr)) return error.SignatureVerificationFailed;
 }
@@ -211,7 +214,9 @@ test "verifyPrehashed matches std verifyPrehashed" {
     var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     crypto.hash.sha2.Sha256.hash(msg, &digest, .{});
     const mul_pc = try P256.precomputeMulPublicAffine(kp.public_key.p);
-    try verifyPrehashed(sig, digest, kp.public_key, &mul_pc);
+    const w7 = try W7Table.create(std.testing.allocator, kp.public_key.p);
+    defer W7Table.deinit(std.testing.allocator, w7);
+    try verifyPrehashed(sig, digest, kp.public_key, &mul_pc, w7.rowsPtr());
     try sig.verifyPrehashed(digest, kp.public_key);
 }
 

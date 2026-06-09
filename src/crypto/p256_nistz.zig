@@ -13,10 +13,14 @@ const fiat = @import("p256_fiat_hw.zig");
 const bedrock_c = @import("bedrock_c_enabled.zig");
 
 pub const enabled = builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64;
+pub const TableRows = [37]table.Row;
 
 const IdentityElementError = crypto.errors.IdentityElementError;
 
 const Jacobian = [3]coord.Coord;
+
+/// Bedrock Jacobian w7 accumulation for ECDSA verify (faster than projective on AArch64).
+pub const use_bedrock_verify_accum = coord.hw.enabled;
 
 fn feFromMontgomeryLimbs(limbs: [4]u64) Fe {
     return .{ .limbs = limbs };
@@ -51,28 +55,69 @@ fn selectAffine(row: table.Row, idx: usize, row_i: usize) table.AffineMont {
     return row[idx];
 }
 
-fn jacobianToP256(j: Jacobian) IdentityElementError!P256 {
-    if (!coord.nonzero(j[2])) return error.IdentityElement;
-    const X = Fe{ .limbs = j[0] };
-    const Y = Fe{ .limbs = j[1] };
+fn jacobianToAffineMont(j: Jacobian) table.AffineMont {
     const Z = Fe{ .limbs = j[2] };
     const z_inv2 = field_inv_sqr.invSqrMont(Z);
     const z_inv4 = z_inv2.sq();
-    const yz = Y.mul(Z);
-    return P256{
-        .x = X.mul(z_inv2),
-        .y = yz.mul(z_inv4),
+    var x_out: coord.Coord = undefined;
+    var yz: coord.Coord = undefined;
+    var y_out: coord.Coord = undefined;
+    coord.mul(&x_out, j[0], z_inv2.limbs);
+    coord.mul(&yz, j[1], j[2]);
+    coord.mul(&y_out, yz, z_inv4.limbs);
+    return .{ .x = x_out, .y = y_out };
+}
+
+fn jacobianToP256(j: Jacobian) IdentityElementError!P256 {
+    if (!coord.nonzero(j[2])) return error.IdentityElement;
+    const aff = jacobianToAffineMont(j);
+    return .{
+        .x = feFromMontgomeryLimbs(aff.x),
+        .y = feFromMontgomeryLimbs(aff.y),
         .z = Fe.one,
     };
 }
 
-fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
-    const ret = mulBaseProjectiveVarTime(s);
-    try ret.rejectIdentity();
-    return ret;
+fn p256ToJacobian(p: P256) Jacobian {
+    return .{ p.x.limbs, p.y.limbs, p.z.limbs };
 }
 
-fn accumulateW7Window(
+pub fn publicKeyHash(p: P256) u64 {
+    const aff = p.affineCoordinatesVarTime();
+    var buf: [64]u8 = undefined;
+    @memcpy(buf[0..32], &aff.x.toBytes(.big));
+    @memcpy(buf[32..64], &aff.y.toBytes(.big));
+    return std.hash.Wyhash.hash(0, &buf);
+}
+
+/// Heap-owned 37×64 w7 precompute table for a single P-256 public key.
+pub const W7Table = struct {
+    pubkey_hash: u64,
+    rows: TableRows,
+
+    pub fn create(allocator: std.mem.Allocator, p: P256) !*W7Table {
+        const self = try allocator.create(W7Table);
+        self.* = .{
+            .pubkey_hash = publicKeyHash(p),
+            .rows = buildPrecomputedTable(p),
+        };
+        return self;
+    }
+
+    pub fn deinit(allocator: std.mem.Allocator, self: *W7Table) void {
+        allocator.destroy(self);
+    }
+
+    pub fn rowsPtr(self: *const W7Table) *const TableRows {
+        return &self.rows;
+    }
+
+    pub fn matchesPublicKey(self: *const W7Table, p: P256) bool {
+        return self.pubkey_hash == publicKeyHash(p);
+    }
+};
+
+fn accumulateW7WindowProjective(
     acc: *P256,
     ret_is_zero: *bool,
     row: table.Row,
@@ -100,7 +145,37 @@ fn accumulateW7Window(
     }
 }
 
-fn mulAffineTableVarTime(s: [32]u8, precomputed: *const [37]table.Row) P256 {
+fn accumulateW7WindowJacobian(
+    acc: *Jacobian,
+    ret_is_zero: *bool,
+    one_z: coord.Coord,
+    row: table.Row,
+    row_i: usize,
+    wvalue: u64,
+) void {
+    const mag: usize = @intCast(wvalue >> 1);
+    if (mag == 0) return;
+
+    const pt = selectAffine(row, mag - 1, row_i);
+    var y_limbs = pt.y;
+    if ((wvalue & 1) != 0) {
+        var y_neg: coord.Coord = undefined;
+        fiat.opp(&y_neg, pt.y);
+        y_limbs = y_neg;
+    }
+    const q_affine: [2]coord.Coord = .{ pt.x, y_limbs };
+
+    if (!ret_is_zero.*) {
+        var out: Jacobian = undefined;
+        coord.addMixedAffineOrDouble(&out, acc.*, q_affine);
+        acc.* = out;
+    } else {
+        acc.* = .{ pt.x, y_limbs, one_z };
+        ret_is_zero.* = false;
+    }
+}
+
+fn mulAffineTableProjectiveVarTime(s: [32]u8, precomputed: *const TableRows) P256 {
     var ret_is_zero = true;
     var acc = P256.identityElement;
 
@@ -108,19 +183,72 @@ fn mulAffineTableVarTime(s: [32]u8, precomputed: *const [37]table.Row) P256 {
     while (i >= 0) : (i -= 1) {
         const row_i: usize = @intCast(i);
         const wvalue = boothRecodeW7(loadWindow(s, row_i));
-        accumulateW7Window(&acc, &ret_is_zero, precomputed[row_i], row_i, wvalue);
+        accumulateW7WindowProjective(&acc, &ret_is_zero, precomputed[row_i], row_i, wvalue);
     }
 
     return acc;
+}
+
+fn mulAffineTableJacobianVarTime(s: [32]u8, precomputed: *const TableRows) P256 {
+    var ret_is_zero = true;
+    var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
+    const one_z = montgomeryOne();
+
+    var i: isize = 36;
+    while (i >= 0) : (i -= 1) {
+        const row_i: usize = @intCast(i);
+        const wvalue = boothRecodeW7(loadWindow(s, row_i));
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, precomputed[row_i], row_i, wvalue);
+    }
+
+    return jacobianToP256(acc) catch unreachable;
+}
+
+fn mulAffineTableVarTime(s: [32]u8, precomputed: *const TableRows) P256 {
+    if (use_bedrock_verify_accum) return mulAffineTableJacobianVarTime(s, precomputed);
+    return mulAffineTableProjectiveVarTime(s, precomputed);
 }
 
 fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
     return mulAffineTableVarTime(s, &table.ecp_nistz256_precomputed);
 }
 
-/// Build a Gueron–Krasnov 37×64 affine table for variable-time `k·P` (ECDSA verify).
-pub fn buildPrecomputedTable(p: P256) [37]table.Row {
-    var rows: [37]table.Row = undefined;
+/// Build a Gueron–Krasnov 37×64 affine table using Bedrock Jacobian row math.
+pub fn buildPrecomputedTable(p: P256) TableRows {
+    if (!use_bedrock_verify_accum) return buildPrecomputedTableProjective(p);
+
+    var rows: TableRows = undefined;
+    var row_j = p256ToJacobian(p);
+    const one_z = montgomeryOne();
+
+    for (0..37) |row_i| {
+        const limit: usize = if (row_i == 36) 16 else 64;
+        const row_aff = jacobianToAffineMont(row_j);
+        const base_xy: [2]coord.Coord = .{ row_aff.x, row_aff.y };
+        rows[row_i][0] = row_aff;
+
+        var acc: Jacobian = .{ base_xy[0], base_xy[1], one_z };
+        var idx: usize = 1;
+        while (idx < limit) : (idx += 1) {
+            var out: Jacobian = undefined;
+            coord.addMixedAffineOrDouble(&out, acc, base_xy);
+            acc = out;
+            rows[row_i][idx] = jacobianToAffineMont(acc);
+        }
+
+        if (row_i < 36) {
+            for (0..7) |_| {
+                var out: Jacobian = undefined;
+                coord.doublePoint(&out, row_j);
+                row_j = out;
+            }
+        }
+    }
+    return rows;
+}
+
+fn buildPrecomputedTableProjective(p: P256) TableRows {
+    var rows: TableRows = undefined;
     var row_base = p;
 
     for (0..37) |row_i| {
@@ -138,40 +266,13 @@ pub fn buildPrecomputedTable(p: P256) [37]table.Row {
     return rows;
 }
 
-const MulPublicTableCache = struct {
-    hash: u64 = 0,
-    table: [37]table.Row = undefined,
-    ready: bool = false,
-};
-var mul_public_table_cache: MulPublicTableCache = .{};
-
-fn hashPoint(p: P256) u64 {
-    const aff = p.affineCoordinatesVarTime();
-    var buf: [64]u8 = undefined;
-    @memcpy(buf[0..32], &aff.x.toBytes(.big));
-    @memcpy(buf[32..64], &aff.y.toBytes(.big));
-    return std.hash.Wyhash.hash(0, &buf);
-}
-
-/// Cached 37×64 w7 table for repeated verify against the same public key.
-pub fn mulPublicTableFor(p: P256) *const [37]table.Row {
-    const h = hashPoint(p);
-    if (mul_public_table_cache.ready and mul_public_table_cache.hash == h) {
-        return &mul_public_table_cache.table;
-    }
-    mul_public_table_cache.table = buildPrecomputedTable(p);
-    mul_public_table_cache.hash = h;
-    mul_public_table_cache.ready = true;
-    return &mul_public_table_cache.table;
-}
-
 /// Variable-time k·P using a precomputed w7 table (ECDSA verify hot path).
-pub fn mulPublicVarTimeFromTable(s: [32]u8, precomputed: *const [37]table.Row) P256 {
+pub fn mulPublicVarTimeFromTable(s: [32]u8, precomputed: *const TableRows) P256 {
     return mulAffineTableVarTime(s, precomputed);
 }
 
 /// Base-point w7 table (`k·G`).
-pub fn basePrecomputedTable() *const [37]table.Row {
+pub fn basePrecomputedTable() *const TableRows {
     return &table.ecp_nistz256_precomputed;
 }
 
@@ -179,8 +280,30 @@ pub fn basePrecomputedTable() *const [37]table.Row {
 pub fn mulDoubleBaseVarTimeFromTables(
     s1: [32]u8,
     s2: [32]u8,
-    table1: *const [37]table.Row,
-    table2: *const [37]table.Row,
+    table1: *const TableRows,
+    table2: *const TableRows,
+) P256 {
+    if (!use_bedrock_verify_accum) return mulDoubleBaseProjectiveFromTables(s1, s2, table1, table2);
+
+    var ret_is_zero = true;
+    var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
+    const one_z = montgomeryOne();
+
+    var i: isize = 36;
+    while (i >= 0) : (i -= 1) {
+        const row_i: usize = @intCast(i);
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table1[row_i], row_i, boothRecodeW7(loadWindow(s1, row_i)));
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table2[row_i], row_i, boothRecodeW7(loadWindow(s2, row_i)));
+    }
+
+    return jacobianToP256(acc) catch unreachable;
+}
+
+fn mulDoubleBaseProjectiveFromTables(
+    s1: [32]u8,
+    s2: [32]u8,
+    table1: *const TableRows,
+    table2: *const TableRows,
 ) P256 {
     var ret_is_zero = true;
     var acc = P256.identityElement;
@@ -188,8 +311,8 @@ pub fn mulDoubleBaseVarTimeFromTables(
     var i: isize = 36;
     while (i >= 0) : (i -= 1) {
         const row_i: usize = @intCast(i);
-        accumulateW7Window(&acc, &ret_is_zero, table1[row_i], row_i, boothRecodeW7(loadWindow(s1, row_i)));
-        accumulateW7Window(&acc, &ret_is_zero, table2[row_i], row_i, boothRecodeW7(loadWindow(s2, row_i)));
+        accumulateW7WindowProjective(&acc, &ret_is_zero, table1[row_i], row_i, boothRecodeW7(loadWindow(s1, row_i)));
+        accumulateW7WindowProjective(&acc, &ret_is_zero, table2[row_i], row_i, boothRecodeW7(loadWindow(s2, row_i)));
     }
 
     return acc;
@@ -206,6 +329,12 @@ pub fn mulBaseVarTime(s: [32]u8) P256 {
     return mulBaseProjectiveVarTime(s);
 }
 
+fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
+    const ret = mulBaseProjectiveVarTime(s);
+    try ret.rejectIdentity();
+    return ret;
+}
+
 fn mulBaseJacobian(s: [32]u8) IdentityElementError!P256 {
     var ret_is_zero = true;
     var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
@@ -215,26 +344,7 @@ fn mulBaseJacobian(s: [32]u8) IdentityElementError!P256 {
     while (i >= 0) : (i -= 1) {
         const row_i: usize = @intCast(i);
         const wvalue = boothRecodeW7(loadWindow(s, row_i));
-        const mag: usize = @intCast(wvalue >> 1);
-        if (mag == 0) continue;
-
-        const pt = selectAffine(table.ecp_nistz256_precomputed[row_i], mag - 1, row_i);
-        var y_limbs = pt.y;
-        if ((wvalue & 1) != 0) {
-            var y_neg: coord.Coord = undefined;
-            fiat.opp(&y_neg, pt.y);
-            y_limbs = y_neg;
-        }
-        const q_affine: [2]coord.Coord = .{ pt.x, y_limbs };
-
-        if (!ret_is_zero) {
-            var out: Jacobian = undefined;
-            coord.addMixedAffineOrDouble(&out, acc, q_affine);
-            acc = out;
-        } else {
-            acc = .{ pt.x, y_limbs, one_z };
-            ret_is_zero = false;
-        }
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table.ecp_nistz256_precomputed[row_i], row_i, wvalue);
     }
 
     return jacobianToP256(acc);
@@ -321,4 +431,16 @@ test "mulDoubleBaseVarTimeFromTables matches split mul" {
     const unified = mulDoubleBaseVarTimeFromTables(s1, s2, basePrecomputedTable(), &q_pc);
     const split = mulBaseVarTime(s1).add(mulPublicVarTimeFromTable(s2, &q_pc));
     try std.testing.expect(unified.equivalent(split));
+}
+
+test "W7Table heap roundtrip" {
+    if (!enabled) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const t = try W7Table.create(gpa, P256.basePoint);
+    defer W7Table.deinit(gpa, t);
+    try std.testing.expect(t.matchesPublicKey(P256.basePoint));
+    const s: [32]u8 = @splat(0x33);
+    const a = mulPublicVarTimeFromTable(s, t.rowsPtr());
+    const b = try P256.basePoint.mulPublic(Fe.orderSwap(s), .little);
+    try std.testing.expect(a.equivalent(b));
 }
