@@ -24,8 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8280 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6050 /s** | ~6660 /s | ~0.91× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4900 /s** | ~6650 /s | ~0.74× |
+| Handshake TLS 1.3 (ECDHE + cert) | **~5980 /s** | ~6560 /s | ~0.91× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4870 /s** | ~6350 /s | ~0.77× |
 | Transfer send AES-128-GCM (16 KiB) | **~8370 MB/s** | ~8320 MB/s | ~1.01× |
 | Transfer recv AES-128-GCM (16 KiB) | **~7940 MB/s** | ~8080 MB/s | ~0.98× |
 | Transfer send AES-256-GCM (16 KiB) | **~7690 MB/s** | ~7620 MB/s | ~1.01× |
@@ -45,14 +45,16 @@ estimated handshake breakdown:
 | `X25519 ECDHE scalarmult` | **~35 000 /s** |
 | `SHA-256 update 2 KiB` | **~1.28 M /s** |
 | `AES-128-GCM TLS 1.3 ~2 KiB encrypt` | **~3.8 M /s** |
+| `ECDSA P-256 signPrehashed` | **~49 000 /s** |
+| `HKDF-Expand-Label key+iv (SHA-256)` | **~5.0 M /s** |
 
 Estimated per-handshake cost (from rates, not timers):
 
 | Component | ~ns |
 |-----------|-----|
 | ECDSA `verifyPrehashed` | ~27 000 |
-| Non-ECDSA (cert row) | ~142 000 |
-| Chain/hostname extra (verify row) | ~37 000 |
+| Non-ECDSA (cert row) | ~138 000 |
+| Chain/hostname extra (verify row) | ~38 000 |
 
 **ECDSA is ~13% of the verify handshake** on this host; closing the BoringSSL gap
 requires faster X25519, transcript hashing, and record crypto — not only double-base
@@ -181,6 +183,13 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   labels instead of recomputing per handshake.
 - **Client flight 2 coalescing:** TLS 1.3 client encrypted flight packs cert/CV/finished into
   one AEAD record (mirrors server coalesced flight).
+- **HKDF fast path:** `tls_hkdf.expandLabelEmpty` uses comptime-built info buffers for empty-
+  context labels (cipher key/iv, finished keys); transcript caches `master_secret` after
+  `applicationSecret`.
+- **Server flight 2 decrypt:** `readClientFlight2` decrypts coalesced client records in-place via
+  `decryptRecordInPlace`.
+- **BoringSSL micro-benchmarks:** `bench/boringssl_bench.cc` prints the same isolated crypto rows
+  as `bench/crypto_bench.zig` for side-by-side primitive comparison.
 - **Trusted cert lookup:** `findTrustedCertDer` skips `memcmp` when cached leaf hash/len
   matches a prewarmed trusted entry.
 - **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
