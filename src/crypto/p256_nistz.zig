@@ -372,6 +372,26 @@ fn mulAffineTableJacobianVarTime(s: [32]u8, precomputed: *const TableRows) P256 
     return jacobianToP256(acc) catch unreachable;
 }
 
+fn mulAffineTableJacobianVarTimeX(s: [32]u8, precomputed: *const TableRows) Fe {
+    var ret_is_zero = true;
+    var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
+    const one_z = montgomeryOne();
+
+    var i: isize = 36;
+    while (i >= 0) : (i -= 1) {
+        const row_i: usize = @intCast(i);
+        const wvalue = boothRecodeW7(loadWindow(s, row_i));
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, precomputed[row_i], row_i, wvalue);
+    }
+
+    return jacobianXCoord(acc);
+}
+
+fn mulAffineTableVarTimeX(s: [32]u8, precomputed: *const TableRows) Fe {
+    if (use_bedrock_verify_accum) return mulAffineTableJacobianVarTimeX(s, precomputed);
+    return mulAffineTableProjectiveVarTime(s, precomputed).xCoordVarTime();
+}
+
 fn mulAffineTableVarTime(s: [32]u8, precomputed: *const TableRows) P256 {
     if (use_bedrock_verify_accum) return mulAffineTableJacobianVarTime(s, precomputed);
     return mulAffineTableProjectiveVarTime(s, precomputed);
@@ -615,6 +635,17 @@ pub fn mulBaseVarTime(s: [32]u8) P256 {
     return mulBaseProjectiveVarTime(s);
 }
 
+/// Variable-time k*G returning affine x only (ECDSA sign hot path).
+pub fn mulBaseVarTimeX(s: [32]u8) Fe {
+    if (!@inComptime() and bedrock_c.enabled) {
+        return (mulBaseBedrockC(s) catch unreachable).xCoordVarTime();
+    }
+    if (!@inComptime() and coord.hw.enabled and use_bedrock_mul_base) {
+        return (mulBaseJacobian(s) catch unreachable).xCoordVarTime();
+    }
+    return mulAffineTableVarTimeX(s, &table.ecp_nistz256_precomputed);
+}
+
 fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
     const ret = mulBaseProjectiveVarTime(s);
     try ret.rejectIdentity();
@@ -657,6 +688,15 @@ test "addMixed from identity yields table point" {
     const g = P256.basePoint.affineCoordinates();
     const r = P256.identityElement.addMixed(g);
     try std.testing.expect(r.equivalent(P256.basePoint));
+}
+
+test "mulBaseVarTimeX matches mulBaseVarTime xCoordVarTime" {
+    var s: [32]u8 = @splat(0);
+    s[0] = 0x42;
+    s[31] = 0x01;
+    const x = mulBaseVarTimeX(s);
+    const p = mulBaseVarTime(s);
+    try std.testing.expect(x.equivalent(p.xCoordVarTime()));
 }
 
 test "nistz mulBase matches mulPublic" {

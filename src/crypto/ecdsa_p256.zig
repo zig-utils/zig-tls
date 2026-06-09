@@ -76,8 +76,11 @@ pub fn signPrehashed(
     const z = hashToScalar(msg_hash);
     const k = deterministicScalar(msg_hash, key_pair.secret_key.bytes, noise);
     const k_le = Fe.orderSwap(k.toBytes(.big));
-    const p = if (nistz_base.enabled) nistz_base.mulBaseVarTime(k_le) else try P256.basePoint.mul(k.toBytes(.big), .big);
-    const r = feBytesToScalar(p.xCoordVarTime().toBytes(.big));
+    const x_fe = if (nistz_base.enabled)
+        nistz_base.mulBaseVarTimeX(k_le)
+    else
+        (try P256.basePoint.mul(k.toBytes(.big), .big)).xCoordVarTime();
+    const r = feBytesToScalar(x_fe.toBytes(.big));
     if (r.isZero()) return error.IdentityElement;
 
     const k_inv = k.invertVarTime();
