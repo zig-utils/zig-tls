@@ -281,12 +281,21 @@ pub const Handshake = struct {
     }
 
     fn initKeys(h: *Self, opt: Options) void {
-        rng.fill(&h.server_random);
+        const groups = opt.effectiveNamedGroups();
+        if (groups.len == 1 and groups[0] == .x25519) {
+            var rnd: [64]u8 = undefined;
+            rng.fill(&rnd);
+            h.server_random = rnd[0..32].*;
+            h.dh_kp = DhKeyPair.initX25519(rnd[32..][0..DhKeyPair.x25519_seed_len].*) catch unreachable;
+            h.dh_kp_ready = true;
+        } else {
+            rng.fill(&h.server_random);
+            h.dh_kp_ready = false;
+        }
         if (opt.auth) |a| {
             // required signature scheme in client hello
             h.signature_scheme = a.key.signature_scheme;
         }
-        h.dh_kp_ready = false;
     }
 
     fn ensureDhKp(h: *Self, opt: Options) !void {
@@ -327,7 +336,6 @@ pub const Handshake = struct {
 
     fn clientFlight1(h: *Self, opt: Options) !void {
         try h.readClientHello(opt, opt.named_groups);
-        h.transcript.use(h.cipher_suite.hash());
         if (h.tls_version == .tls_1_3) try h.readEarlyClientData(opt);
     }
 

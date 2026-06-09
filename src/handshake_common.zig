@@ -951,8 +951,17 @@ pub const DhKeyPair = struct {
     shared_key_buf: [256]u8 = undefined,
 
     pub const seed_len = 32 + 32 + 48 + 64 + 64 + 32;
+    pub const x25519_seed_len = X25519.seed_length;
+
+    pub fn initX25519(seed: [x25519_seed_len]u8) !DhKeyPair {
+        var kp: DhKeyPair = .{};
+        kp.x25519_kp = try X25519.KeyPair.generateDeterministic(seed);
+        return kp;
+    }
 
     pub fn init(seed: [seed_len]u8, named_groups: []const proto.NamedGroup) !DhKeyPair {
+        if (named_groups.len == 1 and named_groups[0] == .x25519)
+            return initX25519(seed[0..x25519_seed_len].*);
         var kp: DhKeyPair = .{};
         for (named_groups) |ng|
             switch (ng) {

@@ -278,15 +278,22 @@ pub const Handshake = struct {
         if (tls_versions == .tls_1_3) {
             if (CipherSuite.uniformHashTag(opt.cipher_suites)) |tag| h.transcript.use(tag);
         }
-        rng.fill(&h.client_random);
-        if (tls_versions != .tls_1_3) {
-            var rsa_buf: [46]u8 = undefined;
-            rng.fill(&rsa_buf);
-            h.rsa_secret = RsaSecret.init(rsa_buf);
+        if (tls_versions == .tls_1_3 and opt.named_groups.len == 1 and opt.named_groups[0] == .x25519) {
+            var rnd: [64]u8 = undefined;
+            rng.fill(&rnd);
+            h.client_random = rnd[0..32].*;
+            h.dh_kp = try DhKeyPair.initX25519(rnd[32..][0..DhKeyPair.x25519_seed_len].*);
+        } else {
+            rng.fill(&h.client_random);
+            if (tls_versions != .tls_1_3) {
+                var rsa_buf: [46]u8 = undefined;
+                rng.fill(&rsa_buf);
+                h.rsa_secret = RsaSecret.init(rsa_buf);
+            }
+            var seed: [DhKeyPair.seed_len]u8 = undefined;
+            rng.fill(&seed);
+            h.dh_kp = try DhKeyPair.init(seed, opt.named_groups);
         }
-        var seed: [DhKeyPair.seed_len]u8 = undefined;
-        rng.fill(&seed);
-        h.dh_kp = try DhKeyPair.init(seed, opt.named_groups);
 
         h.cert = .{
             .host = opt.host,
@@ -980,39 +987,50 @@ pub const Handshake = struct {
     fn makeClientFlight2Tls13(h: *Self, auth: ?*CertKeyPair) !void {
         var w: record.Writer = .initFromIo(h.output);
 
-        // Client change cipher spec
         try w.record(.change_cipher_spec, &[_]u8{1});
+
+        var flight_buf: [4096]u8 = undefined;
+        var flight_len: usize = 0;
+        const appendMsg = struct {
+            fn append(buf: []u8, len: *usize, msg: []const u8) !void {
+                if (len.* + msg.len > buf.len) return error.TlsCipherNoSpaceLeft;
+                @memcpy(buf[len.*..][0..msg.len], msg);
+                len.* += msg.len;
+            }
+        }.append;
 
         if (h.client_certificate_requested) {
             if (auth) |a| {
                 const cb = h.certificateBuilder(a);
-                { // Certificate
-                    var hw = try w.writerAdvance(record.header_len);
-                    try cb.makeCertificate(&hw);
-                    h.transcript.update(hw.buffered());
-                    try h.writeEncrypted(&w, hw.buffered());
-                }
-                { // Client certificate
-                    var hw = try w.writerAdvance(record.header_len);
-                    try cb.makeCertificateVerify(&hw);
-                    h.transcript.update(hw.buffered());
-                    try h.writeEncrypted(&w, hw.buffered());
-                }
+                var cert_msg: [1024]u8 = undefined;
+                var cert_hw = record.Writer.init(&cert_msg);
+                try cb.makeCertificate(&cert_hw);
+                h.transcript.update(cert_hw.buffered());
+                try appendMsg(&flight_buf, &flight_len, cert_hw.buffered());
+
+                var cv_msg: [512]u8 = undefined;
+                var cv_hw = record.Writer.init(&cv_msg);
+                try cb.makeCertificateVerify(&cv_hw);
+                h.transcript.update(cv_hw.buffered());
+                try appendMsg(&flight_buf, &flight_len, cv_hw.buffered());
             } else {
-                // Empty certificate message and no certificate verify message
-                var hw = try w.writerAdvance(record.header_len);
-                try hw.handshakeRecord(.certificate, &[_]u8{ 0, 0, 0, 0 });
-                h.transcript.update(hw.buffered());
-                try h.writeEncrypted(&w, hw.buffered());
+                var cert_msg: [64]u8 = undefined;
+                var cert_hw = record.Writer.init(&cert_msg);
+                try cert_hw.handshakeRecord(.certificate, &[_]u8{ 0, 0, 0, 0 });
+                h.transcript.update(cert_hw.buffered());
+                try appendMsg(&flight_buf, &flight_len, cert_hw.buffered());
             }
         }
 
-        { // Finished
-            var hw = try w.writerAdvance(record.header_len);
-            try hw.handshakeRecord(.finished, h.transcript.clientFinishedTls13());
-            h.transcript.update(hw.buffered());
-            try h.writeEncrypted(&w, hw.buffered());
-        }
+        var fin_msg: [64]u8 = undefined;
+        var fin_hw = record.Writer.init(&fin_msg);
+        try fin_hw.handshakeRecord(.finished, h.transcript.clientFinishedTls13());
+        h.transcript.update(fin_hw.buffered());
+        try appendMsg(&flight_buf, &flight_len, fin_hw.buffered());
+
+        var hw = try w.writerAdvance(record.header_len);
+        try hw.slice(flight_buf[0..flight_len]);
+        try h.writeEncrypted(&w, hw.buffered());
 
         h.output.advance(w.buffered().len);
     }
