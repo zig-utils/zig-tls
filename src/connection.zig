@@ -139,8 +139,12 @@ pub const Connection = struct {
                     const handshake_type: proto.Handshake = @enumFromInt(cleartext[0]);
                     switch (handshake_type) {
                         .new_session_ticket => {
+                            // secret_idx is null on TLS 1.2 connections; a server
+                            // sending NewSessionTicket there must not panic us.
                             if (c.session_resumption) |r| {
-                                r.pushTicket(cleartext, c.session_resumption_secret_idx.?) catch {};
+                                if (c.session_resumption_secret_idx) |idx| {
+                                    r.pushTicket(cleartext, idx) catch {};
+                                }
                             }
                             continue;
                         },

@@ -1118,12 +1118,14 @@ pub const Handshake = struct {
                     if (d.idx < ext_end) try d.skip(ext_end - d.idx);
                 },
                 .application_layer_protocol_negotiation => {
-                    const ext_data = d.payload[d.idx..][0..extension_len];
+                    // `slice` bounds-checks against the payload and advances the
+                    // decoder; do not index `d.payload` directly with the
+                    // attacker-controlled `extension_len` (out-of-bounds read).
+                    const ext_data = try d.slice(extension_len);
                     h.client_alpn_protocols = alpn.parseProtocolListFixed(
                         ext_data,
                         &h.client_alpn_storage,
                     ) catch return error.TlsDecodeError;
-                    try d.skip(extension_len);
                 },
                 .status_request => {
                     try d.skip(extension_len);
@@ -1176,6 +1178,10 @@ pub const Handshake = struct {
                         const binder = try d.slice(binder_len);
                         if (h.selected_psk_identity) |selected| {
                             if (binder_idx == selected) {
+                                // Binder is an HMAC of at most 48 bytes (SHA-384);
+                                // reject wire lengths that would overflow the buffer.
+                                if (binder.len > h.psk_offer_binder.len)
+                                    return error.TlsIllegalParameter;
                                 h.psk_offer_binder_len = binder.len;
                                 @memcpy(h.psk_offer_binder[0..binder.len], binder);
                             }
@@ -1274,6 +1280,36 @@ test "read client hello" {
     try testing.expectEqual(.x25519, h.named_group);
     try testing.expectEqualSlices(u8, &data13.client_random, &h.client_random);
     try testing.expectEqualSlices(u8, &data13.client_public_key, h.client_pub_key);
+}
+
+test "smoke fuzz: readClientHello tolerates arbitrary input" {
+    // Server-facing parser: clients are untrusted, so hostile bytes must surface
+    // as errors, never a panic / OOB read. Mutates a valid ClientHello so the
+    // fuzzer reaches deep into extension parsing, not just the header.
+    var prng = std.Random.DefaultPrng.init(0xd1b54a32d192ed03);
+    const rand = prng.random();
+    var out_buf: [64]u8 = undefined;
+    var writer: Io.Writer = .fixed(&out_buf);
+
+    const base = &data13.client_hello;
+    var buf: [2048]u8 = undefined;
+    const groups = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 };
+
+    var iter: usize = 0;
+    while (iter < 20_000) : (iter += 1) {
+        const n = @min(base.len, buf.len);
+        @memcpy(buf[0..n], base[0..n]);
+        // Flip a handful of random bytes to exercise malformed lengths/enums.
+        const flips = rand.intRangeAtMost(usize, 1, 12);
+        var f: usize = 0;
+        while (f < flips) : (f += 1) {
+            buf[rand.intRangeLessThan(usize, 0, n)] = rand.int(u8);
+        }
+        var reader: Io.Reader = .fixed(buf[0..n]);
+        var h: Handshake = .{ .input = &reader, .output = &writer };
+        h.signature_scheme = .ecdsa_secp521r1_sha512;
+        h.readClientHello(.{ .auth = null, .cipher_suites = cipher_suites.tls13 }, groups) catch {};
+    }
 }
 
 test "make server hello includes pre_shared_key on resume" {
