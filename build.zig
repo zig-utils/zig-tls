@@ -97,6 +97,10 @@ fn addBedrockCMulBase(b: *std.Build, compile: *std.Build.Step.Compile, enabled: 
         .file = b.path("src/crypto/c/bedrock/bedrock_double_base_verify.c"),
         .flags = &.{"-std=c11", "-O3"},
     });
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/crypto/c/bedrock/bedrock_point_mul_public.c"),
+        .flags = &.{"-std=c11", "-O3"},
+    });
 }
 
 fn addHwCryptoAsm(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {

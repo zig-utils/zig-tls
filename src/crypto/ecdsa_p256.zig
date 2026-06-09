@@ -111,7 +111,11 @@ pub fn verifyPrehashed(
     const s_inv = s.invertVarTime();
     const v1 = z.mul(s_inv).toBytes(.little);
     const v2 = r.mul(s_inv).toBytes(.little);
-    const x_fe = if (nistz_base.enabled and mul_w7_table != null) blk: {
+    const x_fe = if (nistz_base.enabled and nistz_base.use_bedrock_mul_public_c) blk: {
+        break :blk nistz_base.mulDoubleBaseVarTimeXPublicWnafBedrockC(v1, public_key.p, v2);
+    } else if (nistz_base.enabled and nistz_base.use_wnaf_mul_public) blk: {
+        break :blk nistz_base.mulDoubleBaseVarTimeXPublicWnaf(v1, public_key.p, v2);
+    } else if (nistz_base.enabled and mul_w7_table != null) blk: {
         break :blk nistz_base.mulDoubleBaseVarTimeXFromTables(
             v1,
             v2,
