@@ -270,6 +270,28 @@ test "signCertificateVerifyTls matches signPrehashed" {
     const b = try signPrehashed(kp, digest, null, d);
     try std.testing.expectEqualSlices(u8, &a.r, &b.r);
     try std.testing.expectEqualSlices(u8, &a.s, &b.s);
+    const w7 = try W7Table.create(std.testing.allocator, kp.public_key.p);
+    defer W7Table.deinit(std.testing.allocator, w7);
+    try verifyPrehashed(a, digest, kp.public_key, null, w7.rowsPtr());
+}
+
+test "signCertificateVerifyTls verifies with transcript digest" {
+    const Transcript = @import("../transcript.zig").Transcript;
+    var seed: [EcdsaP256Sha256.KeyPair.seed_length]u8 = undefined;
+    @memset(&seed, 0x42);
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const d = try scalar.Scalar.fromBytes(kp.secret_key.bytes, .big);
+    var t: Transcript = .{};
+    t.use(.sha256);
+    t.update("client hello bytes");
+    t.update("server hello bytes");
+    var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    t.serverCertificateVerifyDigest(&digest);
+    const sig = try signCertificateVerifyTls(kp.secret_key.bytes, digest, d);
+    const w7 = try W7Table.create(std.testing.allocator, kp.public_key.p);
+    defer W7Table.deinit(std.testing.allocator, w7);
+    try verifyPrehashed(sig, digest, kp.public_key, null, w7.rowsPtr());
+    try sig.verifyPrehashed(digest, kp.public_key);
 }
 
 test "signPrehashed matches std signPrehashed" {

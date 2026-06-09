@@ -167,10 +167,7 @@ pub const Transcript = struct {
 
     pub fn peek(t: *Transcript) []const u8 {
         return switch (t.tag) {
-            inline else => |h| blk: {
-                const digest = @field(t, @tagName(h)).hash.peek();
-                break :blk digest[0..];
-            },
+            inline else => |h| @field(t, @tagName(h)).peekSlice(),
         };
     }
 
@@ -302,11 +299,19 @@ fn TranscriptT(comptime Hash: type) type {
         server_finished_key: [hash_length]u8 = undefined,
         client_finished_key: [hash_length]u8 = undefined,
         buffer: [hash_length + 64 + 34]u8 = undefined,
+        /// Stable storage for `peek()` — hash.peek() returns a by-value digest that must
+        /// not be referenced through a slice after the expression ends.
+        peek_buf: [hash_length]u8 = undefined,
 
         const Self = @This();
 
         fn init(transcript: Hash) Self {
             return .{ .transcript = transcript };
+        }
+
+        fn peekSlice(self: *Self) []const u8 {
+            self.peek_buf = self.hash.peek();
+            return self.peek_buf[0..hash_length];
         }
 
         fn serverCertificateVerify(self: *Self) []const u8 {
@@ -479,18 +484,21 @@ fn TranscriptT(comptime Hash: type) type {
             const secret = self.handshake_secret.?;
             const prk = hkdfExpandLabel(Hkdf, secret, "res binder", &empty_hash, hash_length);
             const expanded = tls_hkdf.expandLabelEmpty(Hkdf, prk, "finished", hash_length);
-            Hmac.create(self.buffer[0..hash_length], &self.hash.peek(), &expanded);
+            const peeked = self.hash.peek();
+            Hmac.create(self.buffer[0..hash_length], &peeked, &expanded);
             return self.buffer[0..hash_length];
         }
 
         fn serverFinishedTls13(self: *Self) []const u8 {
-            Hmac.create(self.buffer[0..hash_length], &self.hash.peek(), &self.server_finished_key);
+            const peeked = self.hash.peek();
+            Hmac.create(self.buffer[0..hash_length], &peeked, &self.server_finished_key);
             return self.buffer[0..hash_length];
         }
 
         // client finished message with header
         fn clientFinishedTls13(self: *Self) []const u8 {
-            Hmac.create(self.buffer[0..hash_length], &self.hash.peek(), &self.client_finished_key);
+            const peeked = self.hash.peek();
+            Hmac.create(self.buffer[0..hash_length], &peeked, &self.client_finished_key);
             return self.buffer[0..hash_length];
         }
     };
