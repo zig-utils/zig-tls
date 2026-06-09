@@ -111,6 +111,38 @@ pub fn run(
     const gcm_rate = rate(gcm_iters, Io.Clock.awake.now(io).nanoseconds - start);
     try w.print("{s:<50} {d:>10.0} /s\n", .{ "AES-128-GCM TLS 1.3 ~2 KiB encrypt", gcm_rate });
 
+    const sign_rate = blk: {
+        i = 0;
+        while (i < 64) : (i += 1) {
+            _ = try ecdsa.signPrehashed(kp, digest, null);
+        }
+        start = Io.Clock.awake.now(io).nanoseconds;
+        i = 0;
+        while (i < crypto_iterations / 10) : (i += 1) {
+            _ = try ecdsa.signPrehashed(kp, digest, null);
+        }
+        break :blk rate(crypto_iterations / 10, Io.Clock.awake.now(io).nanoseconds - start);
+    };
+    try w.print("{s:<50} {d:>10.0} /s\n", .{ "ECDSA P-256 signPrehashed", sign_rate });
+
+    const hkdf_secret: [32]u8 = @splat(0x33);
+    const Hmac = crypto.auth.hmac.Hmac(crypto.hash.sha2.Sha256);
+    const Hkdf = crypto.kdf.hkdf.Hkdf(Hmac);
+    const hkdf_iters = crypto_iterations;
+    i = 0;
+    while (i < 64) : (i += 1) {
+        _ = tls.tls_hkdf.expandLabelEmpty(Hkdf, hkdf_secret, "key", 16);
+        _ = tls.tls_hkdf.expandLabelEmpty(Hkdf, hkdf_secret, "iv", 12);
+    }
+    start = Io.Clock.awake.now(io).nanoseconds;
+    i = 0;
+    while (i < hkdf_iters) : (i += 1) {
+        _ = tls.tls_hkdf.expandLabelEmpty(Hkdf, hkdf_secret, "key", 16);
+        _ = tls.tls_hkdf.expandLabelEmpty(Hkdf, hkdf_secret, "iv", 12);
+    }
+    const hkdf_rate = rate(hkdf_iters, Io.Clock.awake.now(io).nanoseconds - start);
+    try w.print("{s:<50} {d:>10.0} /s\n", .{ "HKDF-Expand-Label key+iv (SHA-256)", hkdf_rate });
+
     if (cert_hs_per_sec > 0 and verify_hs_per_sec > 0 and verify_rate > 0) {
         const ecdsa_ns = 1e9 / verify_rate;
         const cert_other_ns = (1e9 / cert_hs_per_sec) - ecdsa_ns;

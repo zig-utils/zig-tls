@@ -10,7 +10,10 @@
 #include <memory>
 #include <openssl/aead.h>
 #include <openssl/bio.h>
+#include <openssl/curve25519.h>
+#include <openssl/ec_key.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
 #include <openssl/hkdf.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
@@ -22,6 +25,7 @@ namespace {
 constexpr int kIterations = 10000;
 constexpr int kTransferBytes = 16384;
 constexpr int kTransferIterations = 5000;
+constexpr int kCryptoIterations = 100000;
 constexpr int kTagLen = 16;
 constexpr int kKeyLen128 = 16;
 constexpr int kKeyLen256 = 32;
@@ -411,6 +415,104 @@ void BenchRecordCryptoRecv(const TrafficKeys &sender_keys,
   EVP_AEAD_CTX_cleanup(&dec_ctx);
 }
 
+EVP_PKEY *LoadTestPkey() {
+  BIO *key_bio =
+      BIO_new_mem_buf(kKeyPEM, static_cast<int>(strlen(kKeyPEM)));
+  EVP_PKEY *key = PEM_read_bio_PrivateKey(key_bio, nullptr, nullptr, nullptr);
+  BIO_free(key_bio);
+  return key;
+}
+
+void BenchCryptoMicros(EVP_PKEY *pkey) {
+  std::printf("--- crypto micro-benchmarks ---\n");
+
+  uint8_t x25519_priv[32];
+  uint8_t x25519_pub[32];
+  uint8_t x25519_peer[32];
+  uint8_t x25519_shared[32];
+  std::memset(x25519_priv, 0x55, 32);
+  std::memset(x25519_peer, 0x66, 32);
+  X25519_public_from_private(x25519_pub, x25519_priv);
+  for (int i = 0; i < 64; ++i) {
+    X25519(x25519_shared, x25519_priv, x25519_peer);
+  }
+  int64_t start = NowNanos();
+  for (int i = 0; i < kCryptoIterations; ++i) {
+    X25519(x25519_shared, x25519_priv, x25519_peer);
+  }
+  double rate =
+      static_cast<double>(kCryptoIterations) /
+      (static_cast<double>(NowNanos() - start) / 1e9);
+  std::printf("%-50s %10.0f /s\n", "X25519 ECDHE scalarmult", rate);
+
+  uint8_t hkdf_secret[32];
+  std::memset(hkdf_secret, 0x33, 32);
+  TrafficKeys hkdf_keys;
+  for (int i = 0; i < 64; ++i) {
+    TrafficKeysFromSecret(&hkdf_keys, bssl::Span(hkdf_secret, 32), kKeyLen128,
+                          EVP_sha256());
+  }
+  start = NowNanos();
+  for (int i = 0; i < kCryptoIterations; ++i) {
+    TrafficKeysFromSecret(&hkdf_keys, bssl::Span(hkdf_secret, 32), kKeyLen128,
+                          EVP_sha256());
+  }
+  rate = static_cast<double>(kCryptoIterations) /
+         (static_cast<double>(NowNanos() - start) / 1e9);
+  std::printf("%-50s %10.0f /s\n", "HKDF-Expand-Label key+iv (SHA-256)",
+              rate);
+
+  const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
+  if (!ec) {
+    std::fprintf(stderr, "Expected EC test key\n");
+    std::exit(1);
+  }
+  uint8_t digest[32];
+  std::memset(digest, 0xaa, 32);
+  uint8_t sig[128];
+  unsigned int sig_len = 0;
+  if (!ECDSA_sign(0, digest, 32, sig, &sig_len, ec)) {
+    std::fprintf(stderr, "ECDSA_sign failed\n");
+    std::exit(1);
+  }
+
+  for (int i = 0; i < 64; ++i) {
+    if (ECDSA_verify(0, digest, 32, sig, sig_len, ec) != 1) {
+      std::fprintf(stderr, "ECDSA_verify warmup failed\n");
+      std::exit(1);
+    }
+  }
+  start = NowNanos();
+  for (int i = 0; i < kCryptoIterations; ++i) {
+    if (ECDSA_verify(0, digest, 32, sig, sig_len, ec) != 1) {
+      std::fprintf(stderr, "ECDSA_verify failed\n");
+      std::exit(1);
+    }
+  }
+  rate = static_cast<double>(kCryptoIterations) /
+         (static_cast<double>(NowNanos() - start) / 1e9);
+  std::printf("%-50s %10.0f /s\n", "ECDSA P-256 verifyPrehashed", rate);
+
+  sig_len = 0;
+  for (int i = 0; i < 64; ++i) {
+    if (!ECDSA_sign(0, digest, 32, sig, &sig_len, ec)) {
+      std::fprintf(stderr, "ECDSA_sign warmup failed\n");
+      std::exit(1);
+    }
+  }
+  start = NowNanos();
+  for (int i = 0; i < kCryptoIterations / 10; ++i) {
+    sig_len = 0;
+    if (!ECDSA_sign(0, digest, 32, sig, &sig_len, ec)) {
+      std::fprintf(stderr, "ECDSA_sign failed\n");
+      std::exit(1);
+    }
+  }
+  rate = static_cast<double>(kCryptoIterations / 10) /
+         (static_cast<double>(NowNanos() - start) / 1e9);
+  std::printf("%-50s %10.0f /s\n", "ECDSA P-256 signPrehashed", rate);
+}
+
 
 }  // namespace
 
@@ -484,6 +586,15 @@ int main() {
                  false);
   BenchHandshake(client_verify_128, server_128,
                  "handshake TLS 1.3 (ECDHE + cert + verify)", true);
+
+  EVP_PKEY *test_pkey = LoadTestPkey();
+  if (!test_pkey) {
+    std::fprintf(stderr, "LoadTestPkey failed\n");
+    ERR_print_errors_fp(stderr);
+    return 1;
+  }
+  BenchCryptoMicros(test_pkey);
+  EVP_PKEY_free(test_pkey);
 
   BenchTransferSuite(client_128, server_128, EVP_aead_aes_128_gcm(),
                      kKeyLen128, EVP_sha256(),
