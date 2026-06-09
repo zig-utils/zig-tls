@@ -176,6 +176,7 @@ pub const Handshake = struct {
     psk_offer_binder_len: usize = 0,
     early_data_buf: [16384]u8 = undefined,
     early_data: []const u8 = &.{},
+    decrypt_buf: [max_ciphertext_record_len]u8 = undefined,
 
     const Self = @This();
 
@@ -822,11 +823,6 @@ pub const Handshake = struct {
     }
 
     fn readClientFlight2(h: *Self, opt: Options) !void {
-        // buffer for decrypted handshake records
-        var cleartext_buffer: [max_cleartext_len]u8 = undefined;
-        // cleartext writer
-        var cw = Io.Writer.fixed(&cleartext_buffer);
-
         var handshake_state: proto.Handshake = .finished;
         var crt_parser: CertificateParser = undefined;
         if (opt.client_auth) |client_auth| {
@@ -844,10 +840,12 @@ pub const Handshake = struct {
                     if (rec.payload.len != 1) return error.TlsUnexpectedMessage;
                 },
                 .application_data => {
-                    const content_type, const cleartext = try h.cipher.decrypt(cw.unusedCapacitySlice(), rec);
-                    cw.advance(cleartext.len);
+                    if (rec.buffer.len > h.decrypt_buf.len) return error.TlsCipherNoSpaceLeft;
+                    @memcpy(h.decrypt_buf[0..rec.buffer.len], rec.buffer);
+                    const cleartext = try h.cipher.decryptRecordInPlace(h.decrypt_buf[0..rec.buffer.len]);
 
-                    var d = record.Decoder.init(content_type, cw.buffered());
+                    var cleartext_off: usize = 0;
+                    var d = record.Decoder.init(.handshake, cleartext[cleartext_off..]);
                     try d.expectContentType(.handshake);
                     while (!d.eof()) {
                         const handshake_type = try d.decode(proto.Handshake);
@@ -859,9 +857,9 @@ pub const Handshake = struct {
                             continue :outer; // fragmented handshake into multiple records
 
                         defer {
-                            h.transcript.update(d.payload[0..d.idx]);
-                            _ = cw.consume(d.idx);
-                            d = record.Decoder.init(content_type, cw.buffered());
+                            h.transcript.update(cleartext[cleartext_off .. cleartext_off + d.idx]);
+                            cleartext_off += d.idx;
+                            d = record.Decoder.init(.handshake, cleartext[cleartext_off..]);
                         }
 
                         if (handshake_state != handshake_type)
