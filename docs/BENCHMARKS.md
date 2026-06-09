@@ -45,7 +45,7 @@ estimated handshake breakdown:
 | `X25519 ECDHE scalarmult` | **~35 000 /s** |
 | `SHA-256 update 2 KiB` | **~1.28 M /s** |
 | `AES-128-GCM TLS 1.3 ~2 KiB encrypt` | **~3.8 M /s** |
-| `ECDSA P-256 signPrehashed` | **~49 000 /s** |
+| `ECDSA P-256 signPrehashed` | **~58 000 /s** |
 | `HKDF-Expand-Label key+iv (SHA-256)` | **~5.0 M /s** |
 
 Estimated per-handshake cost (from rates, not timers):
@@ -190,6 +190,10 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   `decryptRecordInPlace`.
 - **BoringSSL micro-benchmarks:** `bench/boringssl_bench.cc` prints the same isolated crypto rows
   as `bench/crypto_bench.zig` for side-by-side primitive comparison.
+- **ECDSA sign x-only:** `mulBaseVarTimeX` skips full Jacobian→affine `y` on the `k·G` path used by
+  `signPrehashed` (~20% sign throughput gain on Apple Silicon; BoringSSL sign still ~1.2× faster).
+- **Cert Wyhash:** `parseCertificate` computes leaf Wyhash once per entry and passes it to
+  `findTrustedCertDer`.
 - **Trusted cert lookup:** `findTrustedCertDer` skips `memcmp` when cached leaf hash/len
   matches a prewarmed trusted entry.
 - **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
