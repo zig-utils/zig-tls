@@ -24,8 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8280 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~5890 /s** | ~6680 /s | ~0.88× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4830 /s** | ~6510 /s | ~0.74× |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6050 /s** | ~6660 /s | ~0.91× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4900 /s** | ~6650 /s | ~0.74× |
 | Transfer send AES-128-GCM (16 KiB) | **~8370 MB/s** | ~8320 MB/s | ~1.01× |
 | Transfer recv AES-128-GCM (16 KiB) | **~7940 MB/s** | ~8080 MB/s | ~0.98× |
 | Transfer send AES-256-GCM (16 KiB) | **~7690 MB/s** | ~7620 MB/s | ~1.01× |
@@ -175,6 +175,12 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **Handshake TLS 1.3 GCM:** encrypted handshake records use `encryptTls13` / `decryptTls13`
   (cached AD GHASH) instead of generic AEAD; client decrypts server flight in-place via
   `decryptRecordInPlace`.
+- **X25519-only DH init:** single-group bench configs use `DhKeyPair.initX25519` (32-byte seed)
+  and one `rng.fill` for client/server random + ECDHE key material.
+- **HKDF empty hash:** `TranscriptT` caches `tls.emptyHash(Hash)` at comptime for `derived`
+  labels instead of recomputing per handshake.
+- **Client flight 2 coalescing:** TLS 1.3 client encrypted flight packs cert/CV/finished into
+  one AEAD record (mirrors server coalesced flight).
 - **Trusted cert lookup:** `findTrustedCertDer` skips `memcmp` when cached leaf hash/len
   matches a prewarmed trusted entry.
 - **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
