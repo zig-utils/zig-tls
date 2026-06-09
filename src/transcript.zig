@@ -283,11 +283,17 @@ pub const Transcript = struct {
     }
 };
 
+fn emptyHashConst(comptime Hash: type) [Hash.digest_length]u8 {
+    @setEvalBranchQuota(20_000);
+    return tls.emptyHash(Hash);
+}
+
 fn TranscriptT(comptime Hash: type) type {
     return struct {
         const Hmac = crypto.auth.hmac.Hmac(Hash);
         const Hkdf = crypto.kdf.hkdf.Hkdf(Hmac);
         const hash_length = Hash.digest_length; // Hmac.mac_length == Hmac.key_length == Hash.digest_length
+        const empty_hash: [hash_length]u8 = emptyHashConst(Hash);
 
         hash: Hash,
         handshake_secret: ?[hash_length]u8 = null,
@@ -420,7 +426,6 @@ fn TranscriptT(comptime Hash: type) type {
         fn handshakeSecret(self: *Self, shared_key: []const u8) Transcript.Secret {
             const hello_hash = self.hash.peek();
 
-            const empty_hash = tls.emptyHash(Hash);
             const zeroes: [hash_length]u8 = @splat(0);
             const early_secret = if (self.handshake_secret) |hs| hs else Hkdf.extract(&[1]u8{0}, &zeroes);
             const hs_derived_secret = hkdfExpandLabel(Hkdf, early_secret, "derived", &empty_hash, hash_length);
@@ -444,7 +449,6 @@ fn TranscriptT(comptime Hash: type) type {
         fn applicationSecret(self: *Self) Transcript.Secret {
             const handshake_hash = self.hash.peek();
 
-            const empty_hash = tls.emptyHash(Hash);
             const zeroes: [hash_length]u8 = @splat(0);
             const ap_derived_secret = hkdfExpandLabel(Hkdf, self.handshake_secret.?, "derived", &empty_hash, hash_length);
             const master_secret = Hkdf.extract(&ap_derived_secret, &zeroes);
@@ -459,7 +463,6 @@ fn TranscriptT(comptime Hash: type) type {
 
         fn resumptionSecret(self: *Self) []const u8 {
             const handshake_hash = self.hash.peek();
-            const empty_hash = tls.emptyHash(Hash);
             const zeroes: [hash_length]u8 = @splat(0);
             const ap_derived_secret = hkdfExpandLabel(Hkdf, self.handshake_secret.?, "derived", &empty_hash, hash_length);
             const master_secret = Hkdf.extract(&ap_derived_secret, &zeroes);
@@ -469,7 +472,7 @@ fn TranscriptT(comptime Hash: type) type {
 
         fn pskBinder(self: *Self) []const u8 {
             const secret = self.handshake_secret.?;
-            const prk = hkdfExpandLabel(Hkdf, secret, "res binder", &tls.emptyHash(Hash), hash_length);
+            const prk = hkdfExpandLabel(Hkdf, secret, "res binder", &empty_hash, hash_length);
             const expanded = hkdfExpandLabel(Hkdf, prk, "finished", "", hash_length);
             Hmac.create(self.buffer[0..hash_length], &self.hash.peek(), &expanded);
             return self.buffer[0..hash_length];
