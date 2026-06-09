@@ -193,7 +193,8 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **ECDSA sign x-only:** `mulBaseVarTimeX` skips full Jacobian→affine `y` on the `k·G` path used by
   `signPrehashed` (~20% sign throughput gain on Apple Silicon; BoringSSL sign still ~1.2× faster).
 - **Cert Wyhash:** `parseCertificate` computes leaf Wyhash once per entry and passes it to
-  `findTrustedCertDer`.
+  `findTrustedCertDer`; repeat handshakes skip Wyhash when DER length and a 16-byte prefix
+  match the cached leaf.
 - **Trusted cert lookup:** `findTrustedCertDer` skips `memcmp` when cached leaf hash/len
   matches a prewarmed trusted entry; `cached_trusted_bytes_index` makes repeat-handshake
   lookup O(1) after prewarm.

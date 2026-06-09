@@ -500,6 +500,23 @@ fn bundleContainsCertDer(bundle: Certificate.Bundle, bytes_index: u32, der: []co
 }
 
 const prewarm_trusted_max = 32;
+const leaf_der_prefix_len = 16;
+
+fn cacheLeafDerPrefix(h: *CertificateParser, der: []const u8) void {
+    const n = @min(leaf_der_prefix_len, der.len);
+    @memcpy(h.cached_leaf_der_prefix[0..n], der[0..n]);
+    h.cached_leaf_der_prefix_len = @intCast(n);
+}
+
+fn leafWyhash(h: *const CertificateParser, der: []const u8) u64 {
+    if (h.cached_leaf_ready and der.len == h.cached_leaf_der_len and h.cached_leaf_der_prefix_len > 0) {
+        const n = h.cached_leaf_der_prefix_len;
+        if (der.len >= n and mem.eql(u8, der[0..n], h.cached_leaf_der_prefix[0..n])) {
+            return h.cached_leaf_hash;
+        }
+    }
+    return std.hash.Wyhash.hash(0, der);
+}
 
 fn findTrustedCertDer(h: *const CertificateParser, der: []const u8, leaf_hash: u64) ?u32 {
     const der_len: u32 = @intCast(der.len);
@@ -583,6 +600,8 @@ pub const CertificateParser = struct {
     cached_not_before: u64 = 0,
     cached_not_after: u64 = 0,
     cached_leaf_der_len: u32 = 0,
+    cached_leaf_der_prefix: [16]u8 = undefined,
+    cached_leaf_der_prefix_len: u8 = 0,
     cached_trusted_bytes_index: ?u32 = null,
     prewarmed_trusted: struct {
         count: u8 = 0,
@@ -618,6 +637,7 @@ pub const CertificateParser = struct {
         try h.cacheParsedPublicKey();
         h.cached_leaf_hash = std.hash.Wyhash.hash(0, der);
         h.cached_leaf_der_len = @intCast(der.len);
+        cacheLeafDerPrefix(h, der);
         h.cached_not_before = subject.validity.not_before;
         h.cached_not_after = subject.validity.not_after;
         h.indexPrewarmedTrusted(bytes_index, der);
@@ -680,7 +700,7 @@ pub const CertificateParser = struct {
         }
         d.idx = start_idx + certs_len;
 
-        const leaf_hash = std.hash.Wyhash.hash(0, crt);
+        const leaf_hash = leafWyhash(h, crt);
         if (h.cached_leaf_ready and crt.len == h.cached_leaf_der_len and leaf_hash == h.cached_leaf_hash) {
             return;
         }
@@ -692,6 +712,7 @@ pub const CertificateParser = struct {
         try h.cacheParsedPublicKey();
         h.cached_leaf_hash = leaf_hash;
         h.cached_leaf_der_len = @intCast(crt.len);
+        cacheLeafDerPrefix(h, crt);
         h.cached_not_before = subject.validity.not_before;
         h.cached_not_after = subject.validity.not_after;
         h.cached_leaf_ready = true;
@@ -723,7 +744,7 @@ pub const CertificateParser = struct {
             if (trust_chain_established)
                 continue;
 
-            const leaf_hash = std.hash.Wyhash.hash(0, crt);
+            const leaf_hash = leafWyhash(h, crt);
             const trusted_index = if (!h.skip_verify) findTrustedCertDer(h, crt, leaf_hash) else null;
             const reuse_leaf = h.cached_leaf_ready and
                 crt.len == h.cached_leaf_der_len and
@@ -761,6 +782,7 @@ pub const CertificateParser = struct {
                     try h.cacheParsedPublicKey();
                     h.cached_leaf_hash = leaf_hash;
                     h.cached_leaf_der_len = @intCast(crt.len);
+                    cacheLeafDerPrefix(h, crt);
                     h.cached_not_before = subject.validity.not_before;
                     h.cached_not_after = subject.validity.not_after;
                     if (trusted_index) |idx| {
