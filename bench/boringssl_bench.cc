@@ -15,6 +15,7 @@
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/span.h>
+#include <openssl/x509.h>
 
 namespace {
 
@@ -88,7 +89,7 @@ enum ssl_verify_result_t AcceptAny(SSL *ssl, uint8_t *out_alert) {
   return ssl_verify_ok;
 }
 
-bool ConfigureCtx(SSL_CTX *ctx, bool server, bool load_credentials) {
+bool ConfigureCtx(SSL_CTX *ctx, bool server, bool load_credentials, bool verify_peer) {
   if (!SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION) ||
       !SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION)) {
     return false;
@@ -99,8 +100,28 @@ bool ConfigureCtx(SSL_CTX *ctx, bool server, bool load_credentials) {
     }
   }
   if (!server) {
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
-    SSL_CTX_set_custom_verify(ctx, SSL_VERIFY_NONE, AcceptAny);
+    if (verify_peer) {
+      X509_STORE *store = X509_STORE_new();
+      BIO *cert_bio =
+          BIO_new_mem_buf(kCertPEM, static_cast<int>(strlen(kCertPEM)));
+      X509 *cert = PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr);
+      BIO_free(cert_bio);
+      if (!store || !cert || !X509_STORE_add_cert(store, cert)) {
+        X509_free(cert);
+        X509_STORE_free(store);
+        return false;
+      }
+      X509_free(cert);
+      if (!SSL_CTX_set1_verify_cert_store(ctx, store)) {
+        X509_STORE_free(store);
+        return false;
+      }
+      X509_STORE_free(store);
+      SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+    } else {
+      SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+      SSL_CTX_set_custom_verify(ctx, SSL_VERIFY_NONE, AcceptAny);
+    }
   }
   return true;
 }
@@ -212,7 +233,8 @@ void PrintHeader() {
   std::printf("%s\n", "----------------------------------------------------------------");
 }
 
-void BenchHandshake(CTXPtr &client_ctx, CTXPtr &server_ctx, const char *label) {
+void BenchHandshake(CTXPtr &client_ctx, CTXPtr &server_ctx, const char *label,
+                    bool verify_hostname) {
   const int64_t start = NowNanos();
   for (int i = 0; i < kIterations; ++i) {
     SSL *client_raw = nullptr;
@@ -224,6 +246,10 @@ void BenchHandshake(CTXPtr &client_ctx, CTXPtr &server_ctx, const char *label) {
     }
     SSLPtr client(client_raw, SSL_free);
     SSLPtr server(server_raw, SSL_free);
+    if (verify_hostname && !SSL_set1_host(client.get(), "localhost")) {
+      std::fprintf(stderr, "SSL_set1_host failed\n");
+      std::exit(1);
+    }
     if (!CompleteHandshake(client.get(), server.get())) {
       std::fprintf(stderr, "Handshake failed\n");
       ERR_print_errors_fp(stderr);
@@ -412,14 +438,17 @@ void BenchTransferSuite(CTXPtr &client_ctx, CTXPtr &server_ctx,
 
 int main() {
   CTXPtr client_128(SSL_CTX_new(TLS_method()), SSL_CTX_free);
+  CTXPtr client_verify_128(SSL_CTX_new(TLS_method()), SSL_CTX_free);
   CTXPtr server_128(SSL_CTX_new(TLS_method()), SSL_CTX_free);
   CTXPtr client_256(SSL_CTX_new(TLS_method()), SSL_CTX_free);
   CTXPtr server_256(SSL_CTX_new(TLS_method()), SSL_CTX_free);
-  if (!client_128 || !server_128 || !client_256 || !server_256 ||
-      !ConfigureCtx(client_128.get(), false, false) ||
-      !ConfigureCtx(server_128.get(), true, true) ||
-      !ConfigureCtx(client_256.get(), false, false) ||
-      !ConfigureCtx(server_256.get(), true, true) ||
+  if (!client_128 || !client_verify_128 || !server_128 || !client_256 ||
+      !server_256 ||
+      !ConfigureCtx(client_128.get(), false, false, false) ||
+      !ConfigureCtx(client_verify_128.get(), false, false, true) ||
+      !ConfigureCtx(server_128.get(), true, true, false) ||
+      !ConfigureCtx(client_256.get(), false, false, false) ||
+      !ConfigureCtx(server_256.get(), true, true, false) ||
       !RestrictCipher(client_256.get(), "AES256-GCM-SHA384") ||
       !RestrictCipher(server_256.get(), "AES256-GCM-SHA384")) {
     std::fprintf(stderr, "Failed to configure SSL contexts\n");
@@ -430,7 +459,10 @@ int main() {
   PrintHeader();
   // BoringSSL's TLS 1.3 server requires a certificate; zig-tls also reports a
   // separate minimal (auth=null) row in bench/main.zig.
-  BenchHandshake(client_128, server_128, "handshake TLS 1.3 (ECDHE + cert)");
+  BenchHandshake(client_128, server_128, "handshake TLS 1.3 (ECDHE + cert)",
+                 false);
+  BenchHandshake(client_verify_128, server_128,
+                 "handshake TLS 1.3 (ECDHE + cert + verify)", true);
 
   BenchTransferSuite(client_128, server_128, EVP_aead_aes_128_gcm(),
                      kKeyLen128, EVP_sha256(),
