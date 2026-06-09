@@ -13,6 +13,7 @@ const proto = @import("protocol.zig");
 
 const X25519 = crypto.dh.X25519;
 const ecdsa_p256 = @import("crypto/ecdsa_p256.zig");
+const nistz_p256 = @import("crypto/p256_nistz.zig");
 const EcdsaP256Sha256 = ecdsa_p256.EcdsaP256Sha256;
 const EcdsaP384Sha384 = crypto.sign.ecdsa.EcdsaP384Sha384;
 const MLKem768 = crypto.kem.ml_kem.MLKem768;
@@ -717,6 +718,7 @@ pub const CertificateParser = struct {
                 .X9_62_prime256v1 => {
                     h.ecdsa_p256_pk = try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
                     h.ecdsa_p256_mul_pc = try ecdsa_p256.P256.precomputeMulPublicAffine(h.ecdsa_p256_pk.?.p);
+                    if (nistz_p256.enabled) _ = nistz_p256.mulPublicTableFor(h.ecdsa_p256_pk.?.p);
                 },
                 .secp384r1 => h.ecdsa_p384_pk = try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key),
                 else => {},

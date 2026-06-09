@@ -72,7 +72,35 @@ fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
     return ret;
 }
 
-fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
+fn accumulateW7Window(
+    acc: *P256,
+    ret_is_zero: *bool,
+    row: table.Row,
+    row_i: usize,
+    wvalue: u64,
+) void {
+    const mag: usize = @intCast(wvalue >> 1);
+    if (mag == 0) return;
+
+    const pt = selectAffine(row, mag - 1, row_i);
+    var y_limbs = pt.y;
+    if ((wvalue & 1) != 0) {
+        var y_neg: coord.Coord = undefined;
+        fiat.opp(&y_neg, pt.y);
+        y_limbs = y_neg;
+    }
+    const qx = feFromMontgomeryLimbs(pt.x);
+    const qy = feFromMontgomeryLimbs(y_limbs);
+
+    if (!ret_is_zero.*) {
+        acc.* = acc.addMixedVarTime(.{ .x = qx, .y = qy });
+    } else {
+        acc.* = .{ .x = qx, .y = qy, .z = Fe.one };
+        ret_is_zero.* = false;
+    }
+}
+
+fn mulAffineTableVarTime(s: [32]u8, precomputed: *const [37]table.Row) P256 {
     var ret_is_zero = true;
     var acc = P256.identityElement;
 
@@ -80,28 +108,70 @@ fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
     while (i >= 0) : (i -= 1) {
         const row_i: usize = @intCast(i);
         const wvalue = boothRecodeW7(loadWindow(s, row_i));
-        const mag: usize = @intCast(wvalue >> 1);
-        if (mag == 0) continue;
-
-        const pt = selectAffine(table.ecp_nistz256_precomputed[row_i], mag - 1, row_i);
-        var y_limbs = pt.y;
-        if ((wvalue & 1) != 0) {
-            var y_neg: coord.Coord = undefined;
-            fiat.opp(&y_neg, pt.y);
-            y_limbs = y_neg;
-        }
-        const qx = feFromMontgomeryLimbs(pt.x);
-        const qy = feFromMontgomeryLimbs(y_limbs);
-
-        if (!ret_is_zero) {
-            acc = acc.addMixedVarTime(.{ .x = qx, .y = qy });
-        } else {
-            acc = .{ .x = qx, .y = qy, .z = Fe.one };
-            ret_is_zero = false;
-        }
+        accumulateW7Window(&acc, &ret_is_zero, precomputed[row_i], row_i, wvalue);
     }
 
     return acc;
+}
+
+fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
+    return mulAffineTableVarTime(s, &table.ecp_nistz256_precomputed);
+}
+
+/// Build a Gueron–Krasnov 37×64 affine table for variable-time `k·P` (ECDSA verify).
+pub fn buildPrecomputedTable(p: P256) [37]table.Row {
+    var rows: [37]table.Row = undefined;
+    var row_base = p;
+
+    for (0..37) |row_i| {
+        const limit: usize = if (row_i == 36) 16 else 64;
+        var multiples: [64]P256 = undefined;
+        multiples[0] = row_base;
+        var j: usize = 1;
+        while (j < limit) : (j += 1) {
+            multiples[j] = multiples[j - 1].add(row_base);
+        }
+        for (0..limit) |idx| {
+            const aff = multiples[idx].affineCoordinatesVarTime();
+            rows[row_i][idx] = .{ .x = aff.x.limbs, .y = aff.y.limbs };
+        }
+        if (row_i < 36) {
+            for (0..7) |_| row_base = row_base.dbl();
+        }
+    }
+    return rows;
+}
+
+const MulPublicTableCache = struct {
+    hash: u64 = 0,
+    table: [37]table.Row = undefined,
+    ready: bool = false,
+};
+var mul_public_table_cache: MulPublicTableCache = .{};
+
+fn hashPoint(p: P256) u64 {
+    const aff = p.affineCoordinatesVarTime();
+    var buf: [64]u8 = undefined;
+    @memcpy(buf[0..32], &aff.x.toBytes(.big));
+    @memcpy(buf[32..64], &aff.y.toBytes(.big));
+    return std.hash.Wyhash.hash(0, &buf);
+}
+
+/// Cached 37×64 w7 table for repeated verify against the same public key.
+pub fn mulPublicTableFor(p: P256) *const [37]table.Row {
+    const h = hashPoint(p);
+    if (mul_public_table_cache.ready and mul_public_table_cache.hash == h) {
+        return &mul_public_table_cache.table;
+    }
+    mul_public_table_cache.table = buildPrecomputedTable(p);
+    mul_public_table_cache.hash = h;
+    mul_public_table_cache.ready = true;
+    return &mul_public_table_cache.table;
+}
+
+/// Variable-time k·P using a precomputed w7 table (ECDSA verify hot path).
+pub fn mulPublicVarTimeFromTable(s: [32]u8, precomputed: *const [37]table.Row) P256 {
+    return mulAffineTableVarTime(s, precomputed);
 }
 
 /// Variable-time k*G without identity check (ECDSA sign hot path).
@@ -204,5 +274,20 @@ test "jacobian mulBase matches projective mulBase" {
         const j = try mulBaseJacobian(s);
         const p = try mulBaseProjective(s);
         try std.testing.expect(j.equivalent(p));
+    }
+}
+
+test "buildPrecomputedTable matches mulPublic" {
+    if (!enabled) return error.SkipZigTest;
+    const pc = buildPrecomputedTable(P256.basePoint);
+    var s_be: [32]u8 = @splat(0);
+    var n: u32 = 1;
+    while (n < 200) : (n += 1) {
+        @memset(&s_be, 0);
+        std.mem.writeInt(u32, s_be[28..32], n, .big);
+        const s = Fe.orderSwap(s_be);
+        const a = mulPublicVarTimeFromTable(s, &pc);
+        const b = try P256.basePoint.mulPublic(s_be, .big);
+        try std.testing.expect(a.equivalent(b));
     }
 }

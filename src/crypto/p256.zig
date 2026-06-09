@@ -422,7 +422,6 @@ pub const P256 = struct {
             if (pos == 0) break;
             q = q.dbl4();
         }
-        try q.rejectIdentity();
         return q;
     }
 
@@ -514,15 +513,9 @@ pub const P256 = struct {
         const s2 = if (endian == .little) s2_ else Fe.orderSwap(s2_);
         if (p1.is_base and nistz_base.enabled) {
             const term1 = nistz_base.mulBaseVarTime(s1);
-            const term2 = if (pc2_affine_cached) |pc|
-                try pcMulAffineVarTimeUnchecked(pc, s2)
-            else blk: {
-                try p2.rejectIdentity();
-                const pc2_jac = precompute(p2, 8);
-                var aff: [9]AffineCoordinates = undefined;
-                for (&pc2_jac, &aff) |*pt, *a| a.* = pt.affineCoordinatesVarTime();
-                break :blk try pcMulAffineVarTimeUnchecked(&aff, s2);
-            };
+            try p2.rejectIdentity();
+            const w7 = nistz_base.mulPublicTableFor(p2);
+            const term2 = nistz_base.mulPublicVarTimeFromTable(s2, w7);
             return term1.add(term2);
         }
         try p1.rejectIdentity();
