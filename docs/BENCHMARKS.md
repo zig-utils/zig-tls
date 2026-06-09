@@ -24,12 +24,12 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8280 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~5760 /s** | ~6770 /s | ~0.85× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4760 /s** | ~6630 /s | ~0.72× |
-| Transfer send AES-128-GCM (16 KiB) | **~8340 MB/s** | ~8450 MB/s | ~0.99× |
-| Transfer recv AES-128-GCM (16 KiB) | **~8030 MB/s** | ~8330 MB/s | ~0.96× |
-| Transfer send AES-256-GCM (16 KiB) | **~7780 MB/s** | ~7740 MB/s | ~1.01× |
-| Transfer recv AES-256-GCM (16 KiB) | **~7430 MB/s** | ~7640 MB/s | ~0.97× |
+| Handshake TLS 1.3 (ECDHE + cert) | **~5890 /s** | ~6680 /s | ~0.88× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4830 /s** | ~6510 /s | ~0.74× |
+| Transfer send AES-128-GCM (16 KiB) | **~8370 MB/s** | ~8320 MB/s | ~1.01× |
+| Transfer recv AES-128-GCM (16 KiB) | **~7940 MB/s** | ~8080 MB/s | ~0.98× |
+| Transfer send AES-256-GCM (16 KiB) | **~7690 MB/s** | ~7620 MB/s | ~1.01× |
+| Transfer recv AES-256-GCM (16 KiB) | **~7380 MB/s** | ~7470 MB/s | ~0.99× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
@@ -40,16 +40,19 @@ estimated handshake breakdown:
 
 | Row | Typical M3 Pro rate |
 |-----|---------------------|
-| `ECDSA P-256 verifyPrehashed` | **~37 000 /s** |
-| `P-256 w7 double-base (x only)` | **~48 000 /s** |
+| `ECDSA P-256 verifyPrehashed` | **~36 000 /s** |
+| `P-256 w7 double-base (x only)` | **~47 000 /s** |
+| `X25519 ECDHE scalarmult` | **~35 000 /s** |
+| `SHA-256 update 2 KiB` | **~1.28 M /s** |
+| `AES-128-GCM TLS 1.3 ~2 KiB encrypt` | **~3.8 M /s** |
 
 Estimated per-handshake cost (from rates, not timers):
 
 | Component | ~ns |
 |-----------|-----|
 | ECDSA `verifyPrehashed` | ~27 000 |
-| Non-ECDSA (cert row) | ~146 000 |
-| Chain/hostname extra (verify row) | ~39 000 |
+| Non-ECDSA (cert row) | ~142 000 |
+| Chain/hostname extra (verify row) | ~37 000 |
 
 **ECDSA is ~13% of the verify handshake** on this host; closing the BoringSSL gap
 requires faster X25519, transcript hashing, and record crypto — not only double-base
@@ -163,8 +166,15 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   affine normalization when comparing `r` (verify hot path).
 - **w7 Shamir loop:** booth windows precomputed once per scalar; 37-step double-base loop
   fully unrolled at comptime; fused G+Q window accumulate per step.
-- **Bench crypto breakdown:** `bench/crypto_bench.zig` micro-benchmarks `verifyPrehashed`
-  and prints estimated ECDSA vs chain vs other handshake cost.
+- **Bench crypto breakdown:** `bench/crypto_bench.zig` micro-benchmarks `verifyPrehashed`,
+  X25519 scalarmult, SHA-256 (2 KiB), TLS 1.3 GCM encrypt, and prints estimated ECDSA vs
+  chain vs other handshake cost.
+- **Transcript single-hash:** when all offered cipher suites share one hash (typical TLS 1.3
+  bench config), client `initKeys` and server `readClientHello` call `transcript.use()` before
+  `ClientHello` bytes are hashed (skips redundant SHA-384/512 updates).
+- **Handshake TLS 1.3 GCM:** encrypted handshake records use `encryptTls13` / `decryptTls13`
+  (cached AD GHASH) instead of generic AEAD; client decrypts server flight in-place via
+  `decryptRecordInPlace`.
 - **Trusted cert lookup:** `findTrustedCertDer` skips `memcmp` when cached leaf hash/len
   matches a prewarmed trusted entry.
 - **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
