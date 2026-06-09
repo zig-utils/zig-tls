@@ -235,6 +235,27 @@ void PrintHeader() {
 
 void BenchHandshake(CTXPtr &client_ctx, CTXPtr &server_ctx, const char *label,
                     bool verify_hostname) {
+  {
+    SSL *client_raw = nullptr;
+    SSL *server_raw = nullptr;
+    if (!CreatePaired(client_ctx.get(), server_ctx.get(), &client_raw,
+                      &server_raw)) {
+      std::fprintf(stderr, "CreatePaired failed\n");
+      std::exit(1);
+    }
+    SSLPtr client(client_raw, SSL_free);
+    SSLPtr server(server_raw, SSL_free);
+    if (verify_hostname && !SSL_set1_host(client.get(), "localhost")) {
+      std::fprintf(stderr, "SSL_set1_host failed\n");
+      std::exit(1);
+    }
+    if (!CompleteHandshake(client.get(), server.get())) {
+      std::fprintf(stderr, "Warmup handshake failed\n");
+      ERR_print_errors_fp(stderr);
+      std::exit(1);
+    }
+  }
+
   const int64_t start = NowNanos();
   for (int i = 0; i < kIterations; ++i) {
     SSL *client_raw = nullptr;

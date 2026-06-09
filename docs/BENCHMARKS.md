@@ -23,13 +23,13 @@ cmake --build /tmp/boringssl/build -j
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Handshake TLS 1.3 (minimal ECDHE) | **~8170 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~6810 /s** | ~6500 /s | ~1.05× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4620 /s** | ~6530 /s | ~0.71× |
-| Transfer send AES-128-GCM (16 KiB) | **~8510 MB/s** | ~8350 MB/s | ~1.02× |
-| Transfer recv AES-128-GCM (16 KiB) | **~7980 MB/s** | ~8030 MB/s | ~0.99× |
-| Transfer send AES-256-GCM (16 KiB) | **~7750 MB/s** | ~7620 MB/s | ~1.02× |
-| Transfer recv AES-256-GCM (16 KiB) | **~7350 MB/s** | ~7480 MB/s | ~0.98× |
+| Handshake TLS 1.3 (minimal ECDHE) | **~8030 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~5270 /s** | ~6670 /s | ~0.79× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4440 /s** | ~5670 /s | ~0.78× |
+| Transfer send AES-128-GCM (16 KiB) | **~7480 MB/s** | ~8240 MB/s | ~0.91× |
+| Transfer recv AES-128-GCM (16 KiB) | **~7640 MB/s** | ~7740 MB/s | ~0.99× |
+| Transfer send AES-256-GCM (16 KiB) | **~7360 MB/s** | ~7320 MB/s | ~1.01× |
+| Transfer recv AES-256-GCM (16 KiB) | **~7310 MB/s** | ~7250 MB/s | ~1.01× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
@@ -41,8 +41,8 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | **zig-tls** (~5%; zig skips CV verify when `insecure_skip_verify`) |
-| Cert + verify handshake | BoringSSL (~30%; ECDSA verify + chain) |
+| Cert handshake | BoringSSL (~21%; ECDSA verify dominates) |
+| Cert + verify handshake | BoringSSL (~22%; chain check is cheap for trusted self-signed) |
 | Transfer AES-128 send | Parity |
 | Transfer AES-128 recv | Parity |
 | Transfer AES-256 | BoringSSL (~1–2%) |
@@ -58,9 +58,11 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 ### zig-tls (`bench/main.zig`)
 
 - X25519-only, TLS 1.3-only, HelloRetryRequest disabled.
-- Client uses `insecure_skip_verify = true` for the default cert row (matches BoringSSL
-  `SSL_VERIFY_NONE`). A separate row enables hostname + chain verification against the
-  bench self-signed CA (`localhost`).
+- Client uses `insecure_skip_verify = true` for the default cert row (skips chain/hostname
+  checks like BoringSSL `SSL_VERIFY_NONE`, but still verifies `CertificateVerify`). A
+  separate row enables full chain + hostname verification against the bench self-signed CA
+  (`localhost`).
+- One warmup handshake before each timed loop (amortizes w7 pubkey table build).
 - Transfer uses monomorphized `encryptApplication` + in-place `decryptRecordInPlace`.
 
 ### BoringSSL (`bench/boringssl_bench.cc`)
@@ -121,9 +123,11 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   `p256_point.br.c.inc` + BoringSSL nistz table; field mul/sqr call Zig hw asm
   via `p256_bedrock_exports.zig`. Default off (projective Zig path is faster on
   Apple Silicon today).
-- **ECDSA verify nistz split:** `mulDoubleBaseVerify` uses `mulBaseVarTime` +
-  w7 `mulPublicVarTimeFromTable` (37×64 Gueron–Krasnov table built once per pubkey)
-  + one add; `xCoordVarTime` extracts r without full affine conversion.
+- **ECDSA verify nistz Shamir:** `mulDoubleBaseVerify` uses unified w7
+  `mulDoubleBaseVarTimeFromTables` (G precompute + per-pubkey 37×64 table);
+  `xCoordVarTime` extracts r without full affine conversion.
+- **CertificateVerify always checked:** `insecure_skip_verify` skips chain/hostname only;
+  leaf pubkey is parsed via `parseCertificateLeaf` so CV ECDSA is still verified.
 - **BoringSSL verify row:** `bench/boringssl_bench.cc` trusts the bench self-signed
   cert (`SSL_CTX_set1_verify_cert_store`, `SSL_VERIFY_PEER`, `SSL_set1_host`).
 - **P-256 sliding window:** `dbl4` coalesces four doublings in width-4 mul loops.
