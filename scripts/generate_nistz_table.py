@@ -34,7 +34,7 @@ def main() -> None:
             idx += 4
             xs = ", ".join(f"0x{v:x}" for v in x)
             ys = ", ".join(f"0x{v:x}" for v in y)
-            lines.append(f"        .{{ .x = .{{{xs}}}, .y = .{{{ys}}} }},")
+            lines.append(f"        .{{ .x = .{{ {xs} }}, .y = .{{ {ys} }} }},")
         lines.append("    },")
     lines.append("};")
     out.write_text("\n".join(lines) + "\n")
