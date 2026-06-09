@@ -617,6 +617,41 @@ pub const CertificateParser = struct {
         d.idx += certs_len;
     }
 
+    /// Parse only the leaf certificate public key (no chain or hostname checks).
+    /// Used when `skip_verify` but CertificateVerify still must be checked.
+    pub fn parseCertificateLeaf(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
+        if (tls_version == .tls_1_3) {
+            const request_context = try d.decode(u8);
+            if (request_context != 0) return error.TlsIllegalParameter;
+        }
+        const certs_len = try d.decode(u24);
+        const start_idx = d.idx;
+        if (d.idx - start_idx >= certs_len) return error.TlsDecodeError;
+
+        const crt_len = try d.decode(u24);
+        const crt = try d.slice(crt_len);
+        if (tls_version == .tls_1_3) {
+            try d.skip(try d.decode(u16));
+        }
+        d.idx = start_idx + certs_len;
+
+        const leaf_hash = std.hash.Wyhash.hash(0, crt);
+        if (h.cached_leaf_ready and crt.len == h.cached_leaf_der_len and leaf_hash == h.cached_leaf_hash) {
+            return;
+        }
+
+        const entry: Certificate = .{ .buffer = crt, .index = 0 };
+        const subject = try entry.parse();
+        h.pub_key = try dupe(&h.pub_key_buf, subject.pubKey());
+        h.pub_key_algo = subject.pub_key_algo;
+        try h.cacheParsedPublicKey();
+        h.cached_leaf_hash = leaf_hash;
+        h.cached_leaf_der_len = @intCast(crt.len);
+        h.cached_not_before = subject.validity.not_before;
+        h.cached_not_after = subject.validity.not_after;
+        h.cached_leaf_ready = true;
+    }
+
     pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
         if (h.now_sec == 0) {
             var ts: std.c.timespec = undefined;

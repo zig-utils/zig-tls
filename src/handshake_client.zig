@@ -859,19 +859,15 @@ pub const Handshake = struct {
                             },
                             .certificate => {
                                 if (h.cert.skip_verify) {
-                                    try CertificateParser.skipCertificate(&d, h.tls_version);
+                                    try h.cert.parseCertificateLeaf(&d, h.tls_version);
                                 } else {
                                     try h.cert.parseCertificate(&d, h.tls_version);
                                 }
                                 handshake_states = &.{.certificate_verify};
                             },
                             .certificate_verify => {
-                                if (!h.cert.skip_verify) {
-                                    try h.cert.parseCertificateVerify(&d);
-                                    try h.cert.verifySignatureTranscript(&h.transcript, .server);
-                                } else {
-                                    try d.skip(length);
-                                }
+                                try h.cert.parseCertificateVerify(&d);
+                                try h.cert.verifySignatureTranscript(&h.transcript, .server);
                                 handshake_states = &.{.finished};
                             },
                             .finished => {
