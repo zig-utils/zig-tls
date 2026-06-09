@@ -129,6 +129,7 @@ pub const nonblock = struct {
 pub const Ktls = @import("Ktls.zig");
 pub const aes_gcm_cached = @import("aes_gcm_cached.zig");
 pub const tls_hkdf = @import("tls_hkdf.zig");
+pub const x25519_base = @import("crypto/x25519_base.zig");
 
 fn pumpNonblockHandshake(cli: *nonblock.Client, srv: *nonblock.Server) !void {
     var cs_buf: [max_ciphertext_record_len]u8 = undefined;
@@ -329,4 +330,5 @@ test {
     _ = @import("ffdhe.zig");
     _ = @import("aes_gcm_cached.zig");
     _ = @import("tls_hkdf.zig");
+    _ = @import("crypto/x25519_base.zig");
 }

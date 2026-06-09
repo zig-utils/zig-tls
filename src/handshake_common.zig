@@ -12,6 +12,7 @@ const rsa = @import("rsa/rsa.zig");
 const proto = @import("protocol.zig");
 
 const X25519 = crypto.dh.X25519;
+const x25519_base = @import("crypto/x25519_base.zig");
 const ecdsa_p256 = @import("crypto/ecdsa_p256.zig");
 const nistz_p256 = @import("crypto/p256_nistz.zig");
 const EcdsaP256Sha256 = ecdsa_p256.EcdsaP256Sha256;
@@ -991,7 +992,6 @@ pub const CertificateParser = struct {
             else => return error.TlsUnknownSignatureScheme,
         }
     }
-
 };
 
 pub fn SchemeHash(comptime scheme: proto.SignatureScheme) type {
@@ -1041,7 +1041,10 @@ pub const DhKeyPair = struct {
 
     pub fn initX25519(seed: [x25519_seed_len]u8) !DhKeyPair {
         var kp: DhKeyPair = .{};
-        kp.x25519_kp = try X25519.KeyPair.generateDeterministic(seed);
+        kp.x25519_kp = .{
+            .secret_key = seed,
+            .public_key = x25519_base.recoverPublicKey(seed),
+        };
         return kp;
     }
 
@@ -1051,7 +1054,10 @@ pub const DhKeyPair = struct {
         var kp: DhKeyPair = .{};
         for (named_groups) |ng|
             switch (ng) {
-                .x25519 => kp.x25519_kp = try X25519.KeyPair.generateDeterministic(seed[0..][0..X25519.seed_length].*),
+                .x25519 => kp.x25519_kp = .{
+                    .secret_key = seed[0..][0..X25519.seed_length].*,
+                    .public_key = x25519_base.recoverPublicKey(seed[0..][0..X25519.seed_length].*),
+                },
                 .secp256r1 => kp.secp256r1_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed[32..][0..EcdsaP256Sha256.KeyPair.seed_length].*),
                 .secp384r1 => kp.secp384r1_kp = try EcdsaP384Sha384.KeyPair.generateDeterministic(seed[32 + 32 ..][0..EcdsaP384Sha384.KeyPair.seed_length].*),
                 .x25519_ml_kem768 => kp.ml_kem768 = try MLKem768.KeyPair.generateDeterministic(seed[32 + 32 + 48 + 64 ..][0..MLKem768.seed_length].*),

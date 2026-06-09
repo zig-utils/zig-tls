@@ -69,6 +69,30 @@ pub fn run(
     const x25519_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
     try w.print("{s:<50} {d:>10.0} /s\n", .{ "X25519 ECDHE scalarmult", x25519_rate });
 
+    i = 0;
+    while (i < 64) : (i += 1) {
+        std.mem.doNotOptimizeAway(tls.x25519_base.recoverPublicKey(x25519_seed));
+    }
+    start = Io.Clock.awake.now(io).nanoseconds;
+    i = 0;
+    while (i < crypto_iterations) : (i += 1) {
+        std.mem.doNotOptimizeAway(tls.x25519_base.recoverPublicKey(x25519_seed));
+    }
+    const x25519_keygen_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
+    try w.print("{s:<50} {d:>10.0} /s\n", .{ "X25519 keygen (comb)", x25519_keygen_rate });
+
+    i = 0;
+    while (i < 64) : (i += 1) {
+        std.mem.doNotOptimizeAway(crypto.dh.X25519.recoverPublicKey(x25519_seed) catch unreachable);
+    }
+    start = Io.Clock.awake.now(io).nanoseconds;
+    i = 0;
+    while (i < crypto_iterations) : (i += 1) {
+        std.mem.doNotOptimizeAway(crypto.dh.X25519.recoverPublicKey(x25519_seed) catch unreachable);
+    }
+    const x25519_keygen_ladder_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
+    try w.print("{s:<50} {d:>10.0} /s\n", .{ "X25519 keygen (ladder)", x25519_keygen_ladder_rate });
+
     const hello_buf: [handshake_record_len]u8 = @splat(0xab);
     i = 0;
     while (i < 64) : (i += 1) {
