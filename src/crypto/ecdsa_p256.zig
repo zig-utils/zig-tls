@@ -29,6 +29,45 @@ fn hashToScalar(msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8) scalar.Scal
     return scalar.Scalar.fromBytes48(xs, .big);
 }
 
+/// RFC6979 nonce for TLS (`noise == null`); matches `deterministicScalar` but avoids
+/// zeroing the full 129-byte HMAC input buffer.
+fn deterministicScalarNoiseless(
+    h: [crypto.hash.sha2.Sha256.digest_length]u8,
+    secret_key: scalar.CompressedScalar,
+) scalar.Scalar {
+    var k: [h.len]u8 = @splat(0);
+    var m: [h.len + 1 + noise_length + secret_key.len + h.len]u8 = undefined;
+    var t: [scalar.encoded_length]u8 = @splat(0);
+    const m_v = m[0..h.len];
+    const m_i = &m[m_v.len];
+    const m_z = m[m_v.len + 1 ..][0..noise_length];
+    const m_x = m[m_v.len + 1 + noise_length ..][0..secret_key.len];
+    const m_h = m[m.len - h.len ..];
+
+    @memset(m_v, 0x01);
+    m_i.* = 0x00;
+    @memset(m_z, 0);
+    @memcpy(m_x, &secret_key);
+    @memcpy(m_h, &h);
+    Prf.create(&k, &m, &k);
+    Prf.create(m_v, m_v, &k);
+    m_i.* = 0x01;
+    Prf.create(&k, &m, &k);
+    Prf.create(m_v, m_v, &k);
+    while (true) {
+        var t_off: usize = 0;
+        while (t_off < t.len) : (t_off += m_v.len) {
+            const t_end = @min(t_off + m_v.len, t.len);
+            Prf.create(m_v, m_v, &k);
+            @memcpy(t[t_off..t_end], m_v[0 .. t_end - t_off]);
+        }
+        if (scalar.Scalar.fromBytes(t, .big)) |s| return s else |_| {}
+        m_i.* = 0x00;
+        Prf.create(&k, m[0 .. m_v.len + 1], &k);
+        Prf.create(m_v, m_v, &k);
+    }
+}
+
 fn deterministicScalar(
     h: [crypto.hash.sha2.Sha256.digest_length]u8,
     secret_key: scalar.CompressedScalar,
@@ -75,7 +114,10 @@ pub fn signPrehashed(
     secret_scalar: ?scalar.Scalar,
 ) (IdentityElementError || NonCanonicalError)!Signature {
     const z = hashToScalar(msg_hash);
-    const k = deterministicScalar(msg_hash, key_pair.secret_key.bytes, noise);
+    const k = if (noise == null)
+        deterministicScalarNoiseless(msg_hash, key_pair.secret_key.bytes)
+    else
+        deterministicScalar(msg_hash, key_pair.secret_key.bytes, noise);
     const k_le = Fe.orderSwap(k.toBytes(.big));
     const x_fe = if (nistz_base.enabled)
         nistz_base.mulBaseVarTimeX(k_le)
@@ -182,6 +224,16 @@ pub fn signatureFromDerTls(der: []const u8) EncodingError!Signature {
     var sig: Signature = undefined;
     if (parseTlsDerP256(der, &sig)) return sig;
     return Signature.fromDer(der);
+}
+
+test "deterministicScalarNoiseless matches deterministicScalar" {
+    var seed: [EcdsaP256Sha256.KeyPair.seed_length]u8 = undefined;
+    @memset(&seed, 0x42);
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const digest: [32]u8 = @splat(0xaa);
+    const a = deterministicScalarNoiseless(digest, kp.secret_key.bytes);
+    const b = deterministicScalar(digest, kp.secret_key.bytes, null);
+    try std.testing.expect(a.equivalent(b));
 }
 
 test "signPrehashed matches std signPrehashed" {
