@@ -174,37 +174,42 @@ pub const Transcript = struct {
     }
 
     const certificate_verify_pad = @as([64]u8, @splat(0x20));
+    const server_cv_label = "TLS 1.3, server CertificateVerify\x00";
+    const client_cv_label = "TLS 1.3, client CertificateVerify\x00";
+    const server_cv_prefix_sha256 = server_cv_prefix_sha256: {
+        var buf: [64 + server_cv_label.len]u8 = undefined;
+        @memcpy(buf[0..64], &certificate_verify_pad);
+        @memcpy(buf[64..], server_cv_label);
+        break :server_cv_prefix_sha256 buf;
+    };
+    const client_cv_prefix_sha256 = client_cv_prefix_sha256: {
+        var buf: [64 + client_cv_label.len]u8 = undefined;
+        @memcpy(buf[0..64], &certificate_verify_pad);
+        @memcpy(buf[64..], client_cv_label);
+        break :client_cv_prefix_sha256 buf;
+    };
+
+    fn certificateVerifyDigest(comptime Hash: type, comptime prefix: []const u8, transcript_hash: []const u8, out: *[Hash.digest_length]u8) void {
+        var buf: [prefix.len + 64]u8 = undefined;
+        @memcpy(buf[0..prefix.len], prefix);
+        @memcpy(buf[prefix.len..][0..transcript_hash.len], transcript_hash);
+        Hash.hash(buf[0 .. prefix.len + transcript_hash.len], out, .{});
+    }
 
     pub fn serverCertificateVerifyDigest(t: *Transcript, out: *[Sha256.digest_length]u8) void {
-        var h = Sha256.init(.{});
-        h.update(&certificate_verify_pad);
-        h.update("TLS 1.3, server CertificateVerify\x00");
-        h.update(t.peek());
-        h.final(out);
+        certificateVerifyDigest(Sha256, server_cv_prefix_sha256[0..], t.peek(), out);
     }
 
     pub fn clientCertificateVerifyDigest(t: *Transcript, out: *[Sha256.digest_length]u8) void {
-        var h = Sha256.init(.{});
-        h.update(&certificate_verify_pad);
-        h.update("TLS 1.3, client CertificateVerify\x00");
-        h.update(t.peek());
-        h.final(out);
+        certificateVerifyDigest(Sha256, client_cv_prefix_sha256[0..], t.peek(), out);
     }
 
     pub fn serverCertificateVerifyDigestSha384(t: *Transcript, out: *[Sha384.digest_length]u8) void {
-        var h = Sha384.init(.{});
-        h.update(&certificate_verify_pad);
-        h.update("TLS 1.3, server CertificateVerify\x00");
-        h.update(t.peek());
-        h.final(out);
+        certificateVerifyDigest(Sha384, server_cv_prefix_sha256[0..], t.peek(), out);
     }
 
     pub fn clientCertificateVerifyDigestSha384(t: *Transcript, out: *[Sha384.digest_length]u8) void {
-        var h = Sha384.init(.{});
-        h.update(&certificate_verify_pad);
-        h.update("TLS 1.3, client CertificateVerify\x00");
-        h.update(t.peek());
-        h.final(out);
+        certificateVerifyDigest(Sha384, client_cv_prefix_sha256[0..], t.peek(), out);
     }
 
     pub fn serverFinishedTls13(t: *Transcript) []const u8 {

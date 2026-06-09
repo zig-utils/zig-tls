@@ -102,11 +102,12 @@ fn benchHandshake(io: Io, w: anytype, server_opt: tls.config.Server, label: []co
 fn benchHandshakeVerify(io: Io, w: anytype, client_opt: tls.config.Client, server_opt: tls.config.Server, label: []const u8) !void {
     const start = benchTime(io);
     var cli = tls.nonblock.Client.init(client_opt);
+    var srv = tls.nonblock.Server.init(server_opt);
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
-        var srv = tls.nonblock.Server.init(server_opt);
         try pumpHandshake(&cli, &srv);
         cli.reset();
+        srv.reset();
     }
     const elapsed_ns = benchTime(io) - start;
     const handshakes_per_sec = @as(f64, @floatFromInt(iterations)) /

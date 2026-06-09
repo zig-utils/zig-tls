@@ -1357,6 +1357,17 @@ pub const NonBlock = struct {
         };
     }
 
+    /// Start a new handshake reusing `opt` (bench / session resumption helpers).
+    pub fn reset(self: *Self) void {
+        var inner: Handshake = .{
+            .input = undefined,
+            .output = undefined,
+        };
+        inner.initKeys(self.opt);
+        self.inner = inner;
+        self.state = .init;
+    }
+
     fn recv(self: *Self) !void {
         const prev: Transcript = self.inner.transcript;
         errdefer self.inner.transcript = prev;
