@@ -24,8 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8280 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~5970 /s** | ~6770 /s | ~0.88× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4880 /s** | ~5980 /s | ~0.82× |
+| Handshake TLS 1.3 (ECDHE + cert) | **~5760 /s** | ~6770 /s | ~0.85× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4760 /s** | ~6630 /s | ~0.72× |
 | Transfer send AES-128-GCM (16 KiB) | **~8340 MB/s** | ~8450 MB/s | ~0.99× |
 | Transfer recv AES-128-GCM (16 KiB) | **~8030 MB/s** | ~8330 MB/s | ~0.96× |
 | Transfer send AES-256-GCM (16 KiB) | **~7780 MB/s** | ~7740 MB/s | ~1.01× |
@@ -41,8 +41,8 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | BoringSSL (~13%; ECDSA verify dominates) |
-| Cert + verify handshake | BoringSSL (~18%; ECDSA verify dominates) |
+| Cert handshake | BoringSSL (~15%; ECDSA verify dominates) |
+| Cert + verify handshake | BoringSSL (~28%; ECDSA + chain verify) |
 | Transfer AES-128 send | Parity |
 | Transfer AES-128 recv | Parity |
 | Transfer AES-256 send | Parity |
@@ -139,6 +139,11 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   `Z⁻¹` per row (`batchInvertFe`) replaces per-entry field inverts.
 - **ECDSA verify x-only:** `mulDoubleBaseVarTimeXFromTables` + `jacobianXCoord` skip full
   affine normalization when comparing `r` (verify hot path).
+- **w7 Shamir loop:** booth windows precomputed once per scalar; 37-step double-base loop
+  fully unrolled at comptime.
+- **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
+  interleaved double-base; **disabled by default** (257 Jacobian/projective doubles lose to
+  unified w7 Shamir on Apple Silicon).
 - **CertificateVerify always checked:** `insecure_skip_verify` skips chain/hostname only;
   leaf pubkey is parsed via `parseCertificateLeaf` so CV ECDSA is still verified.
 - **BoringSSL verify row:** `bench/boringssl_bench.cc` trusts the bench self-signed
