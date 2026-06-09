@@ -248,6 +248,101 @@ fn accumulateW7WindowJacobian(
     }
 }
 
+/// Fused G+Q window accumulate (one branch on both magnitudes zero).
+fn accumulateW7DoubleWindowJacobian(
+    acc: *Jacobian,
+    ret_is_zero: *bool,
+    one_z: coord.Coord,
+    row1: table.Row,
+    row2: table.Row,
+    row_i: usize,
+    w1: u64,
+    w2: u64,
+) void {
+    const mag1: usize = @intCast(w1 >> 1);
+    const mag2: usize = @intCast(w2 >> 1);
+    if (mag1 == 0 and mag2 == 0) return;
+
+    if (mag1 != 0) {
+        const pt = selectAffine(row1, mag1 - 1, row_i);
+        var y_limbs = pt.y;
+        if ((w1 & 1) != 0) {
+            var y_neg: coord.Coord = undefined;
+            fiat.opp(&y_neg, pt.y);
+            y_limbs = y_neg;
+        }
+        const q_affine: [2]coord.Coord = .{ pt.x, y_limbs };
+        if (!ret_is_zero.*) {
+            var out: Jacobian = undefined;
+            coord.addMixedAffineOrDouble(&out, acc.*, q_affine);
+            acc.* = out;
+        } else {
+            acc.* = .{ pt.x, y_limbs, one_z };
+            ret_is_zero.* = false;
+        }
+    }
+
+    if (mag2 != 0) {
+        const pt = selectAffine(row2, mag2 - 1, row_i);
+        var y_limbs = pt.y;
+        if ((w2 & 1) != 0) {
+            var y_neg: coord.Coord = undefined;
+            fiat.opp(&y_neg, pt.y);
+            y_limbs = y_neg;
+        }
+        const q_affine: [2]coord.Coord = .{ pt.x, y_limbs };
+        if (!ret_is_zero.*) {
+            var out: Jacobian = undefined;
+            coord.addMixedAffineOrDouble(&out, acc.*, q_affine);
+            acc.* = out;
+        } else {
+            acc.* = .{ pt.x, y_limbs, one_z };
+            ret_is_zero.* = false;
+        }
+    }
+}
+
+fn accumulateW7WindowProjectiveFromParts(
+    acc: *P256,
+    ret_is_zero: *bool,
+    row: table.Row,
+    row_i: usize,
+    wvalue: u64,
+    mag: usize,
+) void {
+    const pt = selectAffine(row, mag - 1, row_i);
+    var y_limbs = pt.y;
+    if ((wvalue & 1) != 0) {
+        var y_neg: coord.Coord = undefined;
+        fiat.opp(&y_neg, pt.y);
+        y_limbs = y_neg;
+    }
+    const qx = feFromMontgomeryLimbs(pt.x);
+    const qy = feFromMontgomeryLimbs(y_limbs);
+    if (!ret_is_zero.*) {
+        acc.* = acc.addMixedVarTime(.{ .x = qx, .y = qy });
+    } else {
+        acc.* = .{ .x = qx, .y = qy, .z = Fe.one };
+        ret_is_zero.* = false;
+    }
+}
+
+fn accumulateW7DoubleWindowProjective(
+    acc: *P256,
+    ret_is_zero: *bool,
+    row1: table.Row,
+    row2: table.Row,
+    row_i: usize,
+    w1: u64,
+    w2: u64,
+) void {
+    const mag1: usize = @intCast(w1 >> 1);
+    const mag2: usize = @intCast(w2 >> 1);
+    if (mag1 == 0 and mag2 == 0) return;
+    if (mag1 != 0) accumulateW7WindowProjectiveFromParts(acc, ret_is_zero, row1, row_i, w1, mag1);
+    if (mag2 != 0) accumulateW7WindowProjectiveFromParts(acc, ret_is_zero, row2, row_i, w2, mag2);
+}
+
 fn mulAffineTableProjectiveVarTime(s: [32]u8, precomputed: *const TableRows) P256 {
     var ret_is_zero = true;
     var acc = P256.identityElement;
@@ -363,8 +458,7 @@ fn mulDoubleBaseJacobianFromTables(
 
     inline for (0..37) |step| {
         const row_i = 36 - step;
-        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table1[row_i], row_i, w1[row_i]);
-        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, table2[row_i], row_i, w2[row_i]);
+        accumulateW7DoubleWindowJacobian(&acc, &ret_is_zero, one_z, table1[row_i], table2[row_i], row_i, w1[row_i], w2[row_i]);
     }
 
     return acc;
@@ -504,8 +598,7 @@ fn mulDoubleBaseProjectiveFromTables(
 
     inline for (0..37) |step| {
         const row_i = 36 - step;
-        accumulateW7WindowProjective(&acc, &ret_is_zero, table1[row_i], row_i, w1[row_i]);
-        accumulateW7WindowProjective(&acc, &ret_is_zero, table2[row_i], row_i, w2[row_i]);
+        accumulateW7DoubleWindowProjective(&acc, &ret_is_zero, table1[row_i], table2[row_i], row_i, w1[row_i], w2[row_i]);
     }
 
     return acc;
