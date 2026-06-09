@@ -33,6 +33,28 @@ cmake --build /tmp/boringssl/build -j
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
 
+### Crypto micro-benchmarks (same `zig build bench` run)
+
+After the handshake rows, the bench prints isolated P-256 verify throughput and an
+estimated handshake breakdown:
+
+| Row | Typical M3 Pro rate |
+|-----|---------------------|
+| `ECDSA P-256 verifyPrehashed` | **~37 000 /s** |
+| `P-256 w7 double-base (x only)` | **~48 000 /s** |
+
+Estimated per-handshake cost (from rates, not timers):
+
+| Component | ~ns |
+|-----------|-----|
+| ECDSA `verifyPrehashed` | ~27 000 |
+| Non-ECDSA (cert row) | ~146 000 |
+| Chain/hostname extra (verify row) | ~39 000 |
+
+**ECDSA is ~13% of the verify handshake** on this host; closing the BoringSSL gap
+requires faster X25519, transcript hashing, and record crypto — not only double-base
+point math.
+
 BoringSSL's TLS 1.3 server requires a certificate, so there is no BoringSSL minimal-handshake
 row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 
@@ -140,7 +162,11 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **ECDSA verify x-only:** `mulDoubleBaseVarTimeXFromTables` + `jacobianXCoord` skip full
   affine normalization when comparing `r` (verify hot path).
 - **w7 Shamir loop:** booth windows precomputed once per scalar; 37-step double-base loop
-  fully unrolled at comptime.
+  fully unrolled at comptime; fused G+Q window accumulate per step.
+- **Bench crypto breakdown:** `bench/crypto_bench.zig` micro-benchmarks `verifyPrehashed`
+  and prints estimated ECDSA vs chain vs other handshake cost.
+- **Trusted cert lookup:** `findTrustedCertDer` skips `memcmp` when cached leaf hash/len
+  matches a prewarmed trusted entry.
 - **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
   interleaved double-base; **disabled by default** (257 Jacobian/projective doubles lose to
   unified w7 Shamir on Apple Silicon).
