@@ -16,22 +16,29 @@ cmake -S /tmp/boringssl -B /tmp/boringssl/build -DCMAKE_BUILD_TYPE=Release
 cmake --build /tmp/boringssl/build -j
 ```
 
-## Latest run (2026-06-07, Apple M3 Pro)
+## Latest run (2026-06-09, Apple M3 Pro)
 
 **zig-tls:** zig `0.17.0-dev`, `-Doptimize=ReleaseFast -Dcpu=native`  
 **BoringSSL:** `/tmp/boringssl/build` Release (assembly enabled)
 
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
-| Handshake TLS 1.3 (minimal ECDHE) | **~8280 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~5980 /s** | ~6900 /s | ~0.87× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~5950 /s** | ~6730 /s | ~0.88× |
-| Transfer send AES-128-GCM (16 KiB) | **~8370 MB/s** | ~8320 MB/s | ~1.01× |
-| Transfer recv AES-128-GCM (16 KiB) | **~7940 MB/s** | ~8080 MB/s | ~0.98× |
-| Transfer send AES-256-GCM (16 KiB) | **~7690 MB/s** | ~7620 MB/s | ~1.01× |
-| Transfer recv AES-256-GCM (16 KiB) | **~7380 MB/s** | ~7470 MB/s | ~0.99× |
+| Handshake TLS 1.3 (minimal ECDHE) | **~11 400 /s** | — | — |
+| Handshake TLS 1.3 (ECDHE + cert) | **~7440 /s** | ~6510 /s | **~1.14×** |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~7240 /s** | ~6520 /s | **~1.11×** |
+| Transfer send AES-128-GCM (16 KiB) | **~8190 MB/s** | ~8380 MB/s | ~0.98× |
+| Transfer recv AES-128-GCM (16 KiB) | **~7730 MB/s** | ~7920 MB/s | ~0.98× |
+| Transfer send AES-256-GCM (16 KiB) | **~7210 MB/s** | ~7590 MB/s | ~0.95× |
+| Transfer recv AES-256-GCM (16 KiB) | **~7170 MB/s** | ~7390 MB/s | ~0.97× |
 
 Iterations: 10 000 handshakes; 5 000 × 16 384-byte application records per transfer test.
+
+**zig-tls now beats BoringSSL on both certificate handshake rows.** The decisive win is
+the X25519 fixed-base comb for keygen (`src/crypto/x25519_base.zig`): key generation went
+from ~36 k/s (Montgomery ladder) to ~90 k/s, and X25519 keygen is two of the four scalar
+multiplications in a TLS 1.3 handshake. Remaining BoringSSL leads (ECDSA sign,
+variable-base X25519 scalarmult, AES-GCM transfer) come from hand-tuned ARM assembly and
+no longer gate the handshake.
 
 ### Crypto micro-benchmarks (same `zig build bench` run)
 
@@ -41,11 +48,12 @@ estimated handshake breakdown:
 | Row | Typical M3 Pro rate |
 |-----|---------------------|
 | `ECDSA P-256 verifyPrehashed` | **~36 000 /s** |
-| `P-256 w7 double-base (x only)` | **~47 000 /s** |
-| `X25519 ECDHE scalarmult` | **~35 000 /s** |
+| `P-256 w7 double-base (x only)` | **~48 000 /s** |
+| `X25519 keygen (comb, fixed base)` | **~90 000 /s** (ladder ~36 700) |
+| `X25519 ECDHE scalarmult` | **~36 000 /s** |
 | `SHA-256 update 2 KiB` | **~1.28 M /s** |
 | `AES-128-GCM TLS 1.3 ~2 KiB encrypt` | **~3.8 M /s** |
-| `ECDSA P-256 signPrehashed` | **~60 500 /s** |
+| `ECDSA P-256 signPrehashed` | **~57 500 /s** |
 | `HKDF-Expand-Label key+iv (SHA-256)` | **~5.0 M /s** |
 
 Estimated per-handshake cost (from rates, not timers):
@@ -53,12 +61,13 @@ Estimated per-handshake cost (from rates, not timers):
 | Component | ~ns |
 |-----------|-----|
 | ECDSA `verifyPrehashed` | ~27 000 |
-| Non-ECDSA (cert row) | ~135 000 |
+| Non-ECDSA (cert row) | ~105 000 |
 | Chain/hostname extra (verify row) | ~1 000 |
 
-**ECDSA is ~13% of the verify handshake** on this host; closing the BoringSSL gap
-requires faster X25519, transcript hashing, and record crypto — not only double-base
-point math.
+**ECDSA verify is ~20% of the verify handshake** on this host. After the X25519 keygen
+comb, the handshake is no longer X25519-keygen-bound; the remaining non-ECDSA cost is the
+two variable-base X25519 scalarmults (shared secret), transcript hashing, and record
+crypto.
 
 BoringSSL's TLS 1.3 server requires a certificate, so there is no BoringSSL minimal-handshake
 row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
@@ -68,12 +77,12 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | BoringSSL (~13%; server ECDSA sign dominates) |
-| Cert + verify handshake | BoringSSL (~12%; server ECDSA sign dominates) |
-| Transfer AES-128 send | Parity |
-| Transfer AES-128 recv | Parity |
-| Transfer AES-256 send | Parity |
-| Transfer AES-256 recv | Parity |
+| Cert handshake | **zig-tls** (~1.14×) |
+| Cert + verify handshake | **zig-tls** (~1.11×) |
+| Transfer AES-128 send | Parity (~0.98×) |
+| Transfer AES-128 recv | Parity (~0.98×) |
+| Transfer AES-256 send | Parity (~0.95×) |
+| Transfer AES-256 recv | Parity (~0.97×) |
 
 ## Methodology
 
@@ -103,6 +112,11 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 
 ## Performance work in this tree
 
+- **X25519 keygen comb:** `src/crypto/x25519_base.zig` computes the X25519 public key with
+  a constant-time 4-bit fixed-base comb on Edwards25519 (precomputed `d·16^j·B` table, 64
+  additions, no runtime doublings) then maps to the Montgomery u-coordinate
+  `u = (Z+Y)/(Z-Y)`. ~2.5× faster than the Montgomery-ladder `recoverPublicKey`; lifts the
+  full handshake past BoringSSL. Byte-identical to `std.crypto.dh.X25519.recoverPublicKey`.
 - **Transfer:** stitched AES-GCM assembly (AArch64/x86_64, BoringSSL-derived).
 - **Handshake:** single-hash transcript updates after cipher suite selection; TLS 1.3 server
   flight coalesced into one encrypted record; cached TLS 1.3 Certificate message in
