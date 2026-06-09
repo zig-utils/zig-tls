@@ -24,8 +24,8 @@ cmake --build /tmp/boringssl/build -j
 | Benchmark | zig-tls | BoringSSL | Ratio (zig / BoringSSL) |
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8280 /s** | — | — |
-| Handshake TLS 1.3 (ECDHE + cert) | **~5980 /s** | ~6560 /s | ~0.91× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~4870 /s** | ~6350 /s | ~0.77× |
+| Handshake TLS 1.3 (ECDHE + cert) | **~6210 /s** | ~6900 /s | ~0.90× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~5040 /s** | ~6730 /s | ~0.75× |
 | Transfer send AES-128-GCM (16 KiB) | **~8370 MB/s** | ~8320 MB/s | ~1.01× |
 | Transfer recv AES-128-GCM (16 KiB) | **~7940 MB/s** | ~8080 MB/s | ~0.98× |
 | Transfer send AES-256-GCM (16 KiB) | **~7690 MB/s** | ~7620 MB/s | ~1.01× |
@@ -45,7 +45,7 @@ estimated handshake breakdown:
 | `X25519 ECDHE scalarmult` | **~35 000 /s** |
 | `SHA-256 update 2 KiB` | **~1.28 M /s** |
 | `AES-128-GCM TLS 1.3 ~2 KiB encrypt` | **~3.8 M /s** |
-| `ECDSA P-256 signPrehashed` | **~58 000 /s** |
+| `ECDSA P-256 signPrehashed` | **~60 500 /s** |
 | `HKDF-Expand-Label key+iv (SHA-256)` | **~5.0 M /s** |
 
 Estimated per-handshake cost (from rates, not timers):
@@ -53,7 +53,7 @@ Estimated per-handshake cost (from rates, not timers):
 | Component | ~ns |
 |-----------|-----|
 | ECDSA `verifyPrehashed` | ~27 000 |
-| Non-ECDSA (cert row) | ~138 000 |
+| Non-ECDSA (cert row) | ~135 000 |
 | Chain/hostname extra (verify row) | ~38 000 |
 
 **ECDSA is ~13% of the verify handshake** on this host; closing the BoringSSL gap
@@ -68,8 +68,8 @@ row. zig-tls reports both minimal (`auth = null`) and cert handshake rows.
 | Category | Winner |
 |----------|--------|
 | Minimal handshake | **zig-tls** (zig-only row) |
-| Cert handshake | BoringSSL (~15%; ECDSA verify dominates) |
-| Cert + verify handshake | BoringSSL (~28%; ECDSA + chain verify) |
+| Cert handshake | BoringSSL (~10%; server ECDSA sign dominates) |
+| Cert + verify handshake | BoringSSL (~25%; ECDSA sign + chain verify) |
 | Transfer AES-128 send | Parity |
 | Transfer AES-128 recv | Parity |
 | Transfer AES-256 send | Parity |
@@ -145,8 +145,8 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **P-256 field invert (sign/verify):** `field_invert.zig` uses Brian Smith
   `invSqrMont` chain + multiply (`a^{-1} = a^{-2}·a`); `xCoordVarTime` avoids
   full Fermat `pow` on ECDSA sign.
-- **CertificateVerify digest:** single-shot `Sha256.hash` over padded prefix +
-  transcript peek (no incremental `update` chain).
+- **CertificateVerify digest:** incremental `Hash.init` + `update(prefix)` +
+  `update(transcript)` (avoids concat buffer on sign/verify).
 - **Bench server reuse:** `nonblock.Server.reset()` + client `reset()` in
   `bench/main.zig` avoid reallocating server state each iteration.
 - **Bedrock C mul_base (optional):** `-Dbedrock-c-mul-base=true` links vendored
@@ -195,7 +195,12 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
 - **Cert Wyhash:** `parseCertificate` computes leaf Wyhash once per entry and passes it to
   `findTrustedCertDer`.
 - **Trusted cert lookup:** `findTrustedCertDer` skips `memcmp` when cached leaf hash/len
-  matches a prewarmed trusted entry.
+  matches a prewarmed trusted entry; `cached_trusted_bytes_index` makes repeat-handshake
+  lookup O(1) after prewarm.
+- **ECDSA sign scalar cache:** `CertKeyPair.ecdsa_p256_d` avoids re-parsing the P-256
+  private key on every CertificateVerify.
+- **mulBase w7 unroll:** `mulAffineTableJacobianVarTimeX` precomputes Booth windows and
+  unrolls the 37-step accumulation loop (sign `k·G` hot path on AArch64).
 - **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
   interleaved double-base; **disabled by default** (257 Jacobian/projective doubles lose to
   unified w7 Shamir on Apple Silicon).

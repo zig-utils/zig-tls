@@ -373,15 +373,14 @@ fn mulAffineTableJacobianVarTime(s: [32]u8, precomputed: *const TableRows) P256 
 }
 
 fn mulAffineTableJacobianVarTimeX(s: [32]u8, precomputed: *const TableRows) Fe {
+    const w = precomputeW7Windows(s);
     var ret_is_zero = true;
     var acc: Jacobian = .{ @splat(0), @splat(0), @splat(0) };
     const one_z = montgomeryOne();
 
-    var i: isize = 36;
-    while (i >= 0) : (i -= 1) {
-        const row_i: usize = @intCast(i);
-        const wvalue = boothRecodeW7(loadWindow(s, row_i));
-        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, precomputed[row_i], row_i, wvalue);
+    inline for (0..37) |step| {
+        const row_i = 36 - step;
+        accumulateW7WindowJacobian(&acc, &ret_is_zero, one_z, precomputed[row_i], row_i, w[row_i]);
     }
 
     return jacobianXCoord(acc);

@@ -72,6 +72,7 @@ pub fn signPrehashed(
     key_pair: EcdsaP256Sha256.KeyPair,
     msg_hash: [crypto.hash.sha2.Sha256.digest_length]u8,
     noise: ?[noise_length]u8,
+    secret_scalar: ?scalar.Scalar,
 ) (IdentityElementError || NonCanonicalError)!Signature {
     const z = hashToScalar(msg_hash);
     const k = deterministicScalar(msg_hash, key_pair.secret_key.bytes, noise);
@@ -84,7 +85,7 @@ pub fn signPrehashed(
     if (r.isZero()) return error.IdentityElement;
 
     const k_inv = k.invertVarTime();
-    const d = try scalar.Scalar.fromBytes(key_pair.secret_key.bytes, .big);
+    const d = secret_scalar orelse try scalar.Scalar.fromBytes(key_pair.secret_key.bytes, .big);
     const s = k_inv.mul(z.add(r.mul(d)));
     if (s.isZero()) return error.IdentityElement;
 
@@ -191,7 +192,7 @@ test "signPrehashed matches std signPrehashed" {
     var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     crypto.hash.sha2.Sha256.hash(msg, &digest, .{});
     const std_sig = try kp.signPrehashed(digest, null);
-    const fast_sig = try signPrehashed(kp, digest, null);
+    const fast_sig = try signPrehashed(kp, digest, null, null);
     try std.testing.expectEqualSlices(u8, &std_sig.r, &fast_sig.r);
     try std.testing.expectEqualSlices(u8, &std_sig.s, &fast_sig.s);
     try fast_sig.verifyPrehashed(digest, kp.public_key);

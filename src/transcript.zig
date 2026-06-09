@@ -191,10 +191,10 @@ pub const Transcript = struct {
     };
 
     fn certificateVerifyDigest(comptime Hash: type, comptime prefix: []const u8, transcript_hash: []const u8, out: *[Hash.digest_length]u8) void {
-        var buf: [prefix.len + 64]u8 = undefined;
-        @memcpy(buf[0..prefix.len], prefix);
-        @memcpy(buf[prefix.len..][0..transcript_hash.len], transcript_hash);
-        Hash.hash(buf[0 .. prefix.len + transcript_hash.len], out, .{});
+        var st = Hash.init(.{});
+        st.update(prefix);
+        st.update(transcript_hash);
+        _ = st.final(out);
     }
 
     pub fn serverCertificateVerifyDigest(t: *Transcript, out: *[Sha256.digest_length]u8) void {

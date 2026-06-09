@@ -60,6 +60,17 @@ pub const CertKeyPair = struct {
     /// Heap-cached w7 P-256 verify table for the leaf public key (P-256 only).
     ecdsa_p256_w7_table: ?*ecdsa_p256.W7Table = null,
 
+    /// Cached P-256 private scalar for repeated CertificateVerify signing.
+    ecdsa_p256_d: ?ecdsa_p256.P256.scalar.Scalar = null,
+
+    fn cacheEcdsaP256SignScalar(c: *CertKeyPair) void {
+        const ekp = c.ecdsa_key_pair orelse return;
+        c.ecdsa_p256_d = switch (ekp) {
+            .ecdsa_secp256r1_sha256 => |kp| ecdsa_p256.P256.scalar.Scalar.fromBytes(kp.secret_key.bytes, .big) catch null,
+            else => null,
+        };
+    }
+
     pub fn fromFilePath(
         allocator: mem.Allocator,
         io: Io,
@@ -75,6 +86,7 @@ pub const CertKeyPair = struct {
         const key = try PrivateKey.fromFile(allocator, key_file);
 
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        pair.cacheEcdsaP256SignScalar();
         try pair.cacheTls13CertificateMessage(allocator);
         try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
@@ -95,6 +107,7 @@ pub const CertKeyPair = struct {
         const key = try PrivateKey.fromFile(allocator, key_file);
 
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        pair.cacheEcdsaP256SignScalar();
         try pair.cacheTls13CertificateMessage(allocator);
         try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
@@ -173,6 +186,7 @@ pub const CertKeyPair = struct {
         const key = try PrivateKey.parsePem(key_buf[0..key_len]);
 
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        pair.cacheEcdsaP256SignScalar();
         try pair.cacheTls13CertificateMessage(allocator);
         try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
@@ -205,6 +219,7 @@ pub const CertKeyPair = struct {
         try addCertsFromPem(&bundle, allocator, cert_pem, 0);
         const key = try PrivateKey.parsePem(key_pem);
         var pair: CertKeyPair = .{ .bundle = bundle, .key = key, .ecdsa_key_pair = try EcdsaKeyPair.init(key) };
+        pair.cacheEcdsaP256SignScalar();
         try pair.cacheTls13CertificateMessage(allocator);
         try pair.cacheEcdsaP256W7Table(allocator);
         return pair;
@@ -372,7 +387,7 @@ pub const CertificateBuilder = struct {
                         });
                         const digest = hash_state.finalResult();
                         break :blk if (comptime_scheme == .ecdsa_secp256r1_sha256)
-                            try ecdsa_p256.signPrehashed(key_pair, digest, null)
+                            try ecdsa_p256.signPrehashed(key_pair, digest, null, h.cert_key_pair.ecdsa_p256_d)
                         else
                             try key_pair.signPrehashed(digest, null);
                     },
@@ -395,7 +410,7 @@ pub const CertificateBuilder = struct {
                             else => unreachable,
                         }
                         break :blk if (comptime_scheme == .ecdsa_secp256r1_sha256)
-                            try ecdsa_p256.signPrehashed(key_pair, digest, null)
+                            try ecdsa_p256.signPrehashed(key_pair, digest, null, h.cert_key_pair.ecdsa_p256_d)
                         else
                             try key_pair.signPrehashed(digest, null);
                     },
@@ -489,6 +504,7 @@ const prewarm_trusted_max = 32;
 fn findTrustedCertDer(h: *const CertificateParser, der: []const u8, leaf_hash: u64) ?u32 {
     const der_len: u32 = @intCast(der.len);
     if (h.cached_leaf_ready and der_len == h.cached_leaf_der_len and leaf_hash == h.cached_leaf_hash) {
+        if (h.cached_trusted_bytes_index) |idx| return idx;
         for (h.prewarmed_trusted.entries[0..h.prewarmed_trusted.count]) |entry| {
             if (entry.der_len == der_len and entry.hash == leaf_hash) return entry.bytes_index;
         }
@@ -567,6 +583,7 @@ pub const CertificateParser = struct {
     cached_not_before: u64 = 0,
     cached_not_after: u64 = 0,
     cached_leaf_der_len: u32 = 0,
+    cached_trusted_bytes_index: ?u32 = null,
     prewarmed_trusted: struct {
         count: u8 = 0,
         entries: [prewarm_trusted_max]struct {
@@ -604,6 +621,7 @@ pub const CertificateParser = struct {
         h.cached_not_before = subject.validity.not_before;
         h.cached_not_after = subject.validity.not_after;
         h.indexPrewarmedTrusted(bytes_index, der);
+        h.cached_trusted_bytes_index = bytes_index;
         h.cached_leaf_ready = true;
     }
 
@@ -747,6 +765,7 @@ pub const CertificateParser = struct {
                     h.cached_not_after = subject.validity.not_after;
                     if (trusted_index) |idx| {
                         h.indexPrewarmedTrusted(idx, crt);
+                        h.cached_trusted_bytes_index = idx;
                     }
                     h.cached_leaf_ready = true;
                 }
