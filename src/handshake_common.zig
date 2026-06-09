@@ -718,6 +718,37 @@ pub const CertificateParser = struct {
         h.cached_leaf_ready = true;
     }
 
+    fn trySkipTrustedCachedLeaf(
+        h: *CertificateParser,
+        d: *record.Decoder,
+        tls_version: proto.Version,
+    ) !bool {
+        if (h.skip_verify or !h.cached_leaf_ready or h.cached_trusted_bytes_index == null) return false;
+        if (h.host.len > 0 and !h.cached_host_ok) return false;
+
+        if (tls_version == .tls_1_3) {
+            const request_context = try d.decode(u8);
+            if (request_context != 0) return error.TlsIllegalParameter;
+        }
+        const certs_len = try d.decode(u24);
+        const start_idx = d.idx;
+        if (d.idx + certs_len > d.payload.len) return error.TlsDecodeError;
+
+        const crt_len = try d.decode(u24);
+        const crt = try d.slice(crt_len);
+        if (tls_version == .tls_1_3) {
+            try d.skip(try d.decode(u16));
+        }
+        const leaf_hash = leafWyhash(h, crt);
+        if (crt.len != h.cached_leaf_der_len or leaf_hash != h.cached_leaf_hash) {
+            d.idx = start_idx;
+            return false;
+        }
+        try checkCertValidityCached(h);
+        d.idx = start_idx + certs_len;
+        return true;
+    }
+
     pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
         if (h.now_sec == 0) {
             var ts: std.c.timespec = undefined;
@@ -725,6 +756,8 @@ pub const CertificateParser = struct {
                 h.now_sec = ts.sec;
             }
         }
+        if (try h.trySkipTrustedCachedLeaf(d, tls_version)) return;
+
         if (tls_version == .tls_1_3) {
             const request_context = try d.decode(u8);
             if (request_context != 0) return error.TlsIllegalParameter;
@@ -840,8 +873,10 @@ pub const CertificateParser = struct {
             .X9_62_id_ecPublicKey => |curve| switch (curve) {
                 .X9_62_prime256v1 => {
                     h.ecdsa_p256_pk = try EcdsaP256Sha256.PublicKey.fromSec1(h.pub_key);
-                    h.ecdsa_p256_mul_pc = try ecdsa_p256.P256.precomputeMulPublicAffine(h.ecdsa_p256_pk.?.p);
                     try h.cacheEcdsaP256W7Table();
+                    if (h.ecdsaP256W7Rows() == null) {
+                        h.ecdsa_p256_mul_pc = try ecdsa_p256.P256.precomputeMulPublicAffine(h.ecdsa_p256_pk.?.p);
+                    }
                 },
                 .secp384r1 => h.ecdsa_p384_pk = try EcdsaP384Sha384.PublicKey.fromSec1(h.pub_key),
                 else => {},

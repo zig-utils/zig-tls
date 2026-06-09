@@ -25,7 +25,7 @@ cmake --build /tmp/boringssl/build -j
 |-----------|---------|-----------|-------------------------|
 | Handshake TLS 1.3 (minimal ECDHE) | **~8280 /s** | — | — |
 | Handshake TLS 1.3 (ECDHE + cert) | **~6210 /s** | ~6900 /s | ~0.90× |
-| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~5040 /s** | ~6730 /s | ~0.75× |
+| Handshake TLS 1.3 (ECDHE + cert + client verify) | **~5090 /s** | ~6730 /s | ~0.76× |
 | Transfer send AES-128-GCM (16 KiB) | **~8370 MB/s** | ~8320 MB/s | ~1.01× |
 | Transfer recv AES-128-GCM (16 KiB) | **~7940 MB/s** | ~8080 MB/s | ~0.98× |
 | Transfer send AES-256-GCM (16 KiB) | **~7690 MB/s** | ~7620 MB/s | ~1.01× |
@@ -54,7 +54,7 @@ Estimated per-handshake cost (from rates, not timers):
 |-----------|-----|
 | ECDSA `verifyPrehashed` | ~27 000 |
 | Non-ECDSA (cert row) | ~135 000 |
-| Chain/hostname extra (verify row) | ~38 000 |
+| Chain/hostname extra (verify row) | ~23 000 |
 
 **ECDSA is ~13% of the verify handshake** on this host; closing the BoringSSL gap
 requires faster X25519, transcript hashing, and record crypto — not only double-base
@@ -202,6 +202,12 @@ Categories mirror [rustls perf](https://rustls.dev/perf/):
   private key on every CertificateVerify.
 - **mulBase w7 unroll:** `mulAffineTableJacobianVarTimeX` precomputes Booth windows and
   unrolls the 37-step accumulation loop (sign `k·G` hot path on AArch64).
+- **RFC6979 TLS nonce:** `deterministicScalarNoiseless` avoids zeroing the full HMAC
+  input buffer on the `noise == null` signing path.
+- **Trusted leaf fast skip:** `trySkipTrustedCachedLeaf` advances the decoder past a
+  cached trusted leaf without the full certificate chain loop.
+- **Verify precompute:** skip width-8 `precomputeMulPublicAffine` when a w7 table is
+  available (borrowed or owned).
 - **BoringSSL `point_mul_public` (experimental):** Zig + optional Bedrock C ports of wNAF
   interleaved double-base; **disabled by default** (257 Jacobian/projective doubles lose to
   unified w7 Shamir on Apple Silicon).
