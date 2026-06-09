@@ -74,7 +74,7 @@ fn mulBaseProjective(s: [32]u8) IdentityElementError!P256 {
 
 fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
     var ret_is_zero = true;
-    var ret = P256.identityElement;
+    var acc = P256.identityElement;
 
     var i: isize = 36;
     while (i >= 0) : (i -= 1) {
@@ -90,20 +90,18 @@ fn mulBaseProjectiveVarTime(s: [32]u8) P256 {
             fiat.opp(&y_neg, pt.y);
             y_limbs = y_neg;
         }
-        const aff = p256.AffineCoordinates{
-            .x = feFromMontgomeryLimbs(pt.x),
-            .y = feFromMontgomeryLimbs(y_limbs),
-        };
+        const qx = feFromMontgomeryLimbs(pt.x);
+        const qy = feFromMontgomeryLimbs(y_limbs);
 
         if (!ret_is_zero) {
-            ret = ret.addMixedVarTime(aff);
+            acc = acc.addMixedVarTime(.{ .x = qx, .y = qy });
         } else {
-            ret = .{ .x = aff.x, .y = aff.y, .z = Fe.one };
+            acc = .{ .x = qx, .y = qy, .z = Fe.one };
             ret_is_zero = false;
         }
     }
 
-    return ret;
+    return acc;
 }
 
 /// Variable-time k*G without identity check (ECDSA sign hot path).

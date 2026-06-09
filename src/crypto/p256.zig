@@ -136,6 +136,11 @@ pub const P256 = struct {
         return .{ .x = p.x, .y = p.y.neg(), .z = p.z };
     }
 
+    /// Four doublings (width-4 sliding-window step).
+    pub fn dbl4(p: P256) P256 {
+        return p.dbl().dbl().dbl().dbl();
+    }
+
     /// Double a P256 point.
     // Algorithm 6 from https://eprint.iacr.org/2015/1060.pdf
     pub fn dbl(p: P256) P256 {
@@ -188,6 +193,11 @@ pub const P256 = struct {
     /// Variable-time projective mixed add (nistz mulBase / verify hot path).
     pub fn addMixedVarTime(p: P256, q: AffineCoordinates) P256 {
         return addMixedInternal(p, q, false);
+    }
+
+    /// Variable-time mixed subtract (width-8 verify sliding window).
+    pub fn subMixedVarTime(p: P256, q: AffineCoordinates) P256 {
+        return addMixedVarTime(p, q.neg());
     }
 
     fn addMixedInternal(p: P256, q: AffineCoordinates, comptime ct: bool) P256 {
@@ -395,6 +405,10 @@ pub const P256 = struct {
     }
 
     fn pcMulAffineVarTime(pc: *const [9]AffineCoordinates, s: [32]u8) IdentityElementError!P256 {
+        return pcMulAffineVarTimeUnchecked(pc, s);
+    }
+
+    fn pcMulAffineVarTimeUnchecked(pc: *const [9]AffineCoordinates, s: [32]u8) IdentityElementError!P256 {
         const e = slide(s);
         var q = P256.identityElement;
         var pos = e.len - 1;
@@ -403,10 +417,10 @@ pub const P256 = struct {
             if (slot > 0) {
                 q = q.addMixedVarTime(pc[@as(usize, @intCast(slot))]);
             } else if (slot < 0) {
-                q = q.subMixed(pc[@as(usize, @intCast(-slot))]);
+                q = q.subMixedVarTime(pc[@as(usize, @intCast(-slot))]);
             }
             if (pos == 0) break;
-            q = q.dbl().dbl().dbl().dbl();
+            q = q.dbl4();
         }
         try q.rejectIdentity();
         return q;
@@ -487,9 +501,8 @@ pub const P256 = struct {
         return pcMul(&pc, s, true);
     }
 
-    /// Double-base multiplication of public parameters - Compute (p1*s1)+(p2*s2) *IN VARIABLE TIME*
-    /// This can be used for signature verification.
-    pub fn mulDoubleBasePublic(
+    /// Double-base multiplication for ECDSA verify (u1·p1 + u2·p2); skips final identity check.
+    pub fn mulDoubleBaseVerify(
         p1: P256,
         s1_: [32]u8,
         p2: P256,
@@ -500,19 +513,17 @@ pub const P256 = struct {
         const s1 = if (endian == .little) s1_ else Fe.orderSwap(s1_);
         const s2 = if (endian == .little) s2_ else Fe.orderSwap(s2_);
         if (p1.is_base and nistz_base.enabled) {
-            const term1 = try nistz_base.mulBase(s1);
+            const term1 = nistz_base.mulBaseVarTime(s1);
             const term2 = if (pc2_affine_cached) |pc|
-                try pcMulAffineVarTime(pc, s2)
+                try pcMulAffineVarTimeUnchecked(pc, s2)
             else blk: {
                 try p2.rejectIdentity();
                 const pc2_jac = precompute(p2, 8);
                 var aff: [9]AffineCoordinates = undefined;
                 for (&pc2_jac, &aff) |*pt, *a| a.* = pt.affineCoordinatesVarTime();
-                break :blk try pcMulAffineVarTime(&aff, s2);
+                break :blk try pcMulAffineVarTimeUnchecked(&aff, s2);
             };
-            const sum = term1.add(term2);
-            try sum.rejectIdentity();
-            return sum;
+            return term1.add(term2);
         }
         try p1.rejectIdentity();
         var pc1_array: [9]P256 = undefined;
@@ -544,15 +555,28 @@ pub const P256 = struct {
             }
             const slot2 = e2[pos];
             if (slot2 > 0) {
-                q = q.addMixed(pc2_affine[@as(usize, @intCast(slot2))]);
+                q = q.addMixedVarTime(pc2_affine[@as(usize, @intCast(slot2))]);
             } else if (slot2 < 0) {
-                q = q.subMixed(pc2_affine[@as(usize, @intCast(-slot2))]);
+                q = q.subMixedVarTime(pc2_affine[@as(usize, @intCast(-slot2))]);
             }
             if (pos == 0) break;
-            q = q.dbl().dbl().dbl().dbl();
+            q = q.dbl4();
         }
         try q.rejectIdentity();
         return q;
+    }
+
+    /// Double-base multiplication of public parameters - Compute (p1*s1)+(p2*s2) *IN VARIABLE TIME*
+    /// This can be used for signature verification.
+    pub fn mulDoubleBasePublic(
+        p1: P256,
+        s1_: [32]u8,
+        p2: P256,
+        s2_: [32]u8,
+        endian: std.builtin.Endian,
+        pc2_affine_cached: ?*const [9]AffineCoordinates,
+    ) IdentityElementError!P256 {
+        return mulDoubleBaseVerify(p1, s1_, p2, s2_, endian, pc2_affine_cached);
     }
 };
 

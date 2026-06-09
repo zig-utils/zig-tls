@@ -108,8 +108,8 @@ pub fn verifyPrehashed(
     const s_inv = s.invertVarTime();
     const v1 = z.mul(s_inv).toBytes(.little);
     const v2 = r.mul(s_inv).toBytes(.little);
-    const sum = try P256.mulDoubleBasePublic(P256.basePoint, v1, public_key.p, v2, .little, mul_pc);
-    const vr = feBytesToScalar(sum.affineCoordinatesVarTime().x.toBytes(.big));
+    const sum = try P256.mulDoubleBaseVerify(P256.basePoint, v1, public_key.p, v2, .little, mul_pc);
+    const vr = feBytesToScalar(sum.xCoordVarTime().toBytes(.big));
     if (!r.equivalent(vr)) return error.SignatureVerificationFailed;
 }
 
