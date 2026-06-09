@@ -55,12 +55,14 @@ pub const Options = struct {
     /// host name.
     insecure_skip_verify: bool = false,
 
-    /// List of cipher suites to use.
+    /// List of cipher suites to use (default: TLS 1.3 + TLS 1.2 AEAD only).
+    /// For legacy TLS 1.2 CBC compatibility use `cipher_suites.tls12` or
+    /// `cipher_suites.all` explicitly.
     /// To use just tls 1.3 cipher suites:
-    ///   .cipher_suites = &tls.CipherSuite.tls13,
+    ///   .cipher_suites = tls.CipherSuite.tls13,
     /// To select particular cipher suite:
     ///   .cipher_suites = &[_]tls.CipherSuite{tls.CipherSuite.CHACHA20_POLY1305_SHA256},
-    cipher_suites: []const CipherSuite = cipher_suites.all,
+    cipher_suites: []const CipherSuite = cipher_suites.secure,
 
     /// List of named groups to use.
     /// To use specific named group:

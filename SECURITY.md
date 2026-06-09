@@ -20,6 +20,7 @@ zig-tls is a Zig TLS 1.2/1.3 implementation with:
 
 - No C code in the TLS protocol core; optional vendored BoringSSL-derived assembly on AArch64/x86_64 for AES-GCM and P-256 field math (Apache 2.0, see `src/crypto/*/NOTICE`)
 - 0-RTT early data disabled by default (`Server.max_early_data_size = 0`); enable explicitly when needed
+- Default cipher list is `cipher_suites.secure` (TLS 1.3 + TLS 1.2 AEAD only; no CBC/SHA1)
 - Bounded record buffers (max 16 KiB cleartext per RFC 8446)
 - Constant-time RSA decryption paths (see `src/rsa/rsa.zig`)
 - No TLS renegotiation (aligned with BoringSSL policy)

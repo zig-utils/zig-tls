@@ -45,9 +45,10 @@ pub const Options = struct {
     /// Client certificate will be verified with root_ca certificates.
     client_auth: ?ClientAuth = null,
 
-    /// List of supported cipher suites (TLS 1.3 and/or TLS 1.2)
-    /// Default includes both TLS 1.3 and TLS 1.2 secure ciphers for maximum compatibility.
-    cipher_suites: []const CipherSuite = cipher_suites.all,
+    /// List of supported cipher suites (TLS 1.3 and/or TLS 1.2 AEAD).
+    /// Default is `cipher_suites.secure` (no CBC/SHA1). For legacy TLS 1.2 CBC
+    /// clients use `cipher_suites.tls12` or `cipher_suites.all` explicitly.
+    cipher_suites: []const CipherSuite = cipher_suites.secure,
 
     /// Named groups (elliptic curves) to support for key exchange.
     /// Overridden when `enable_post_quantum` is true.
@@ -74,7 +75,9 @@ pub const Options = struct {
     min_version: proto.Version = .tls_1_2,
     max_version: proto.Version = .tls_1_3,
 
-    /// OCSP stapling response to include in handshake (when provided).
+    /// OCSP stapling response bytes (reserved; not yet sent in Certificate
+    /// extensions — clients may request stapling via `status_request` but the
+    /// server does not attach a response today).
     ocsp_response: ?[]const u8 = null,
 
     /// Send HelloRetryRequest when the client key_share does not match the preferred group.

@@ -1162,6 +1162,28 @@ pub const hello_retry_request_random: [32]u8 = .{
 const testing = std.testing;
 const testu = @import("testu.zig");
 
+test "smoke fuzz: parseCertificate tolerates arbitrary input" {
+    var prng = std.Random.DefaultPrng.init(0x517cc1b727220a95);
+    const rand = prng.random();
+    var buf: [800]u8 = undefined;
+    var parser: CertificateParser = .{
+        .root_ca = .empty,
+        .host = "",
+        .skip_verify = true,
+    };
+
+    var iter: usize = 0;
+    while (iter < 10_000) : (iter += 1) {
+        const n = rand.intRangeAtMost(usize, 0, buf.len);
+        rand.bytes(buf[0..n]);
+        var reader: Io.Reader = .fixed(buf[0..n]);
+        var d = record.Record.decoder(&reader) catch continue;
+        _ = d.decode(proto.Handshake) catch continue;
+        _ = d.decode(u24) catch continue;
+        parser.parseCertificate(&d, .tls_1_3) catch {};
+    }
+}
+
 test "CertKeyPair.fromPem loads P-256 credentials" {
     const cert_pem =
         \\-----BEGIN CERTIFICATE-----
