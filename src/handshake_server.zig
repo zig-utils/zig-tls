@@ -275,7 +275,7 @@ pub const Handshake = struct {
 
             h.clientFlight2Tls12(opt) catch |err| {
                 if (!mem.startsWith(u8, @errorName(err), "TlsAlert")) {
-                    try h.writeAlert(if (h.cipher_suite.validate() == null) &h.cipher else null, err);
+                    try h.writeAlert(if (h.cipher_suite.validate()) |_| &h.cipher else |_| null, err);
                 }
                 return err;
             };
