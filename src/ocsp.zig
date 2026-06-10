@@ -1,6 +1,9 @@
 //! Minimal OCSP staple checks for TLS status_request responses (RFC 6960).
 const std = @import("std");
 const crypto = std.crypto;
+const Certificate = crypto.Certificate;
+const ecdsa_p256 = @import("crypto/ecdsa_p256.zig");
+const rsa = @import("rsa/rsa.zig");
 
 /// Staple was present but could not be parsed or was not successful.
 pub const StapleError = error{
@@ -8,7 +11,12 @@ pub const StapleError = error{
     OcspUnsuccessful,
     OcspCertMismatch,
     OcspExpired,
+    OcspBadSignature,
 };
+
+const sha1_rsa_oid = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x05 };
+const sha256_rsa_oid = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b };
+const ecdsa_sha256_oid = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02 };
 
 /// Parse `status_request` extension bytes on a TLS 1.3 Certificate entry.
 pub fn parseTls13StatusRequestExtension(ext_list: []const u8) ?[]const u8 {
@@ -29,8 +37,8 @@ pub fn parseTls13StatusRequestExtension(ext_list: []const u8) ?[]const u8 {
 }
 
 /// Validate a stapled OCSP response for the leaf certificate.
-/// Verifies DER shape, successful status, and CertID hash/name match when a
-/// BasicOCSPResponse is present. Does not verify the OCSP responder signature yet.
+/// Verifies DER shape, successful status, CertID match, validity window, and
+/// the responder signature when a BasicOCSPResponse with embedded cert is present.
 pub fn validateStaple(staple: []const u8, leaf_der: []const u8, now_sec: i64) StapleError!void {
     if (staple.len < 3 or staple[0] != 0x30) return error.OcspMalformed;
     const status = parseResponseStatus(staple) orelse return error.OcspMalformed;
@@ -76,15 +84,13 @@ fn locateBasicOcspResponse(staple: []const u8) ?[]const u8 {
 
 fn validateBasicResponse(basic: []const u8, leaf_der: []const u8, now_sec: i64) StapleError!void {
     var d = DerDecoder.init(basic);
-    const seq = d.sequence() orelse return error.OcspMalformed;
-    _ = seq;
+    _ = d.sequence() orelse return error.OcspMalformed;
     const tbs_start = d.pos;
-    const tbs = d.sequence() orelse return error.OcspMalformed;
+    _ = d.sequence() orelse return error.OcspMalformed;
     const tbs_end = d.pos;
-    _ = tbs;
-    _ = d.skipTo(tbs_end) orelse return error.OcspMalformed;
-    _ = d.skipSignature() orelse return error.OcspMalformed;
-    var tbs_dec = DerDecoder.init(basic[tbs_start..tbs_end]);
+    const tbs_bytes = basic[tbs_start..tbs_end];
+
+    var tbs_dec = DerDecoder.init(tbs_bytes);
     _ = tbs_dec.sequence() orelse return error.OcspMalformed;
     _ = tbs_dec.integer() orelse return error.OcspMalformed; // version
     _ = tbs_dec.skipObject() orelse return error.OcspMalformed; // responderID
@@ -102,6 +108,73 @@ fn validateBasicResponse(basic: []const u8, leaf_der: []const u8, now_sec: i64) 
         const next_update = tbs_dec.generalizedTime() orelse return error.OcspMalformed;
         if (now_sec > 0 and now_sec > next_update) return error.OcspExpired;
     }
+
+    const sig_oid = parseAlgorithmIdentifier(&d) orelse return error.OcspMalformed;
+    const sig_bytes = parseBitString(&d) orelse return error.OcspMalformed;
+    const responder_der = parseFirstResponderCert(&d) orelse return error.OcspBadSignature;
+    try verifyOcspSignature(tbs_bytes, sig_oid, sig_bytes, responder_der);
+}
+
+fn parseAlgorithmIdentifier(d: *DerDecoder) ?[]const u8 {
+    _ = d.sequence() orelse return null;
+    if (d.byte() != 0x06) return null;
+    const oid_len = d.byte() orelse return null;
+    return d.slice(oid_len);
+}
+
+fn parseBitString(d: *DerDecoder) ?[]const u8 {
+    if (d.byte() != 0x03) return null;
+    const len = d.decodeLength() orelse return null;
+    if (len < 1) return null;
+    _ = d.byte() orelse return null;
+    return d.slice(len - 1);
+}
+
+fn parseFirstResponderCert(d: *DerDecoder) ?[]const u8 {
+    if (d.remaining() == 0 or d.peekTag() != 0xa0) return null;
+    _ = d.byte() orelse return null;
+    const wrap_len = d.decodeLength() orelse return null;
+    const wrap_end = d.pos + wrap_len;
+    if (wrap_end > d.buf.len or d.buf[d.pos] != 0x30) return null;
+    const cert_start = d.pos;
+    _ = d.sequence() orelse return null;
+    const cert_end = d.pos;
+    d.pos = wrap_end;
+    return d.buf[cert_start..cert_end];
+}
+
+fn verifyOcspSignature(tbs: []const u8, sig_oid: []const u8, sig: []const u8, responder_der: []const u8) StapleError!void {
+    const entry: Certificate = .{ .buffer = responder_der, .index = 0 };
+    const parsed = entry.parse() catch return error.OcspBadSignature;
+    const pub_key = parsed.pubKey();
+
+    if (std.mem.eql(u8, sig_oid, &sha1_rsa_oid)) {
+        if (parsed.pub_key_algo != .rsaEncryption) return error.OcspBadSignature;
+        const pk = rsa.PublicKey.fromDer(pub_key) catch return error.OcspBadSignature;
+        const signature = rsa.PKCS1v1_5(crypto.hash.Sha1).Signature{ .bytes = sig };
+        signature.verify(tbs, pk) catch return error.OcspBadSignature;
+        return;
+    }
+    if (std.mem.eql(u8, sig_oid, &sha256_rsa_oid)) {
+        if (parsed.pub_key_algo != .rsaEncryption) return error.OcspBadSignature;
+        const pk = rsa.PublicKey.fromDer(pub_key) catch return error.OcspBadSignature;
+        const signature = rsa.PKCS1v1_5(crypto.hash.sha2.Sha256).Signature{ .bytes = sig };
+        signature.verify(tbs, pk) catch return error.OcspBadSignature;
+        return;
+    }
+
+    if (std.mem.eql(u8, sig_oid, &ecdsa_sha256_oid)) {
+        if (parsed.pub_key_algo != .X9_62_id_ecPublicKey) return error.OcspBadSignature;
+        if (parsed.pub_key_algo.X9_62_id_ecPublicKey != .X9_62_prime256v1) return error.OcspBadSignature;
+        const key = ecdsa_p256.EcdsaP256Sha256.PublicKey.fromSec1(pub_key) catch return error.OcspBadSignature;
+        const signature = ecdsa_p256.signatureFromDerTls(sig) catch return error.OcspBadSignature;
+        var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        crypto.hash.sha2.Sha256.hash(tbs, &digest, .{});
+        ecdsa_p256.verifyPrehashed(signature, digest, key, null, null) catch return error.OcspBadSignature;
+        return;
+    }
+
+    return error.OcspBadSignature;
 }
 
 fn validateCertId(d: *DerDecoder, leaf_der: []const u8) StapleError!void {
@@ -218,15 +291,6 @@ const DerDecoder = struct {
         self.pos = end;
         return {};
     }
-
-    fn skipSignature(self: *DerDecoder) ?void {
-        _ = self.sequence() orelse return null;
-        _ = self.sequence() orelse return null;
-        if (self.byte() != 0x03) return null;
-        const len = self.decodeLength() orelse return null;
-        _ = self.slice(len) orelse return null;
-        return {};
-    }
 };
 
 fn parseGeneralizedTime(s: []const u8) ?i64 {
@@ -266,6 +330,39 @@ test "validateStaple rejects unsuccessful response status" {
     const staple = [_]u8{ 0x30, 0x03, 0x0a, 0x01, 0x01 };
     const leaf = [_]u8{ 0x30, 0x00 };
     try std.testing.expectError(error.OcspUnsuccessful, validateStaple(&staple, &leaf, 0));
+}
+
+test "verifyOcspSignature accepts ECDSA-P256 SHA256 over TBS" {
+    const common = @import("handshake_common.zig");
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIBfDCCASOgAwIBAgIUQLqOnCo7H/bJUF1Szr+llCjaUDQwCgYIKoZIzj0EAwIw
+        \\FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDYwODE2NDI0NVoXDTM2MDYwNTE2
+        \\NDI0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+        \\AQcDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4G20Q
+        \\q0dJ3jaRBz8MMglQClooPnY3Z3iNJKNTMFEwHQYDVR0OBBYEFKCBVZdchts7bXZB
+        \\ZWuL8eNAdz/YMB8GA1UdIwQYMBaAFKCBVZdchts7bXZBZWuL8eNAdz/YMA8GA1Ud
+        \\EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgcbi5sqviAW6/cB5IceGx2aBG
+        \\mURelDq3gDVCXdGXhuoCIHgffOqfX89M1r8Hax8HY7MACM+wnevA7UDIurNdCUUU
+        \\-----END CERTIFICATE-----
+    ;
+    const key_pem =
+        \\-----BEGIN EC PRIVATE KEY-----
+        \\MHcCAQEEIKpmzT0Wdz4OucLI2ZaHsBjBsSLW4rqsmjMoDhmegFKdoAoGCCqGSM49
+        \\AwEHoUQDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4
+        \\G20Qq0dJ3jaRBz8MMglQClooPnY3Z3iNJA==
+        \\-----END EC PRIVATE KEY-----
+    ;
+    var pair = try common.CertKeyPair.fromPem(std.testing.allocator, cert_pem, key_pem);
+    defer pair.deinit(std.testing.allocator);
+    const kp = pair.ecdsa_key_pair.?.ecdsa_secp256r1_sha256;
+    const tbs = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0x00 };
+    var digest: [crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    crypto.hash.sha2.Sha256.hash(&tbs, &digest, .{});
+    const sig = try ecdsa_p256.signPrehashed(kp, digest, null, null);
+    var sig_buf: [ecdsa_p256.EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
+    const sig_der = ecdsa_p256.signatureToDerTls(sig, &sig_buf);
+    try verifyOcspSignature(&tbs, &ecdsa_sha256_oid, sig_der, pair.bundle.bytes.items);
 }
 
 test "parseTls13StatusRequestExtension extracts staple" {
