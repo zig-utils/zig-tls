@@ -18,7 +18,8 @@ Full client and server patterns live in the repository [README](../README.md).
 
 ```bash
 zig build test   # includes in-memory interop + OCSP staple tests
-./scripts/testssl.sh localhost 8443   # against a deployed server
+zig build tls-server                  # TLS 1.3 echo on 127.0.0.1:8443
+./scripts/testssl.sh localhost 8443
 ```
 
 Bench credentials for local experiments: `bench/certs.zig`.

@@ -49,6 +49,30 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run TLS benchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    const certs_mod = b.createModule(.{
+        .root_source_file = b.path("bench/certs.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const tls_server_mod = b.createModule(.{
+        .root_source_file = b.path("examples/tls_server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tls_server_mod.addImport("tls", tls_module);
+    tls_server_mod.addImport("certs", certs_mod);
+    const tls_server_exe = b.addExecutable(.{
+        .name = "tls-server",
+        .root_module = tls_server_mod,
+    });
+    tls_server_exe.root_module.link_libc = true;
+    addBedrockCMulBase(b, tls_server_exe, bedrock_c_mul_base);
+    b.installArtifact(tls_server_exe);
+    const run_tls_server = b.addRunArtifact(tls_server_exe);
+    if (b.args) |args| run_tls_server.addArgs(args);
+    const tls_server_step = b.step("tls-server", "Run TLS 1.3 echo server (default :8443)");
+    tls_server_step.dependOn(&run_tls_server.step);
+
     // Fuzz targets (libFuzzer-compatible when built with -Dfuzz)
     const fuzz = b.option(bool, "fuzz", "Build fuzz targets") orelse false;
     if (fuzz) {
