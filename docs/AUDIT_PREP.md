@@ -44,14 +44,16 @@ zig build tls-server -- 9443      # custom port
 ./scripts/testssl.sh localhost 8443
 ```
 
+## Production Features (in scope)
+
+- OCSP stapling: server `Server.ocsp_response`; client `request_ocsp` with full
+  validation when verification is enabled (DER shape, status, CertID, validity window,
+  responder signature, issuer chain, `id-kp-OCSPSigning` or issuing-CA responder)
+- TLS 1.3 echo server: `zig build tls-server` for testssl.sh / openssl interop
+
 ## Known Limitations (document for auditor)
 
-- OCSP stapling: server attaches `Server.ocsp_response` to the leaf Certificate
-  `status_request` extension (TLS 1.3); client validates staples when `request_ocsp`
-  is set and certificate verification is enabled (DER shape, successful status,
-  CertID hash/serial match, thisUpdate/nextUpdate, responder signature, issuer chain,
-  and `id-kp-OCSPSigning` EKU or issuing-CA responder per RFC 6960 §3.2)
-- TLS 1.2 static RSA key exchange: server decrypt path implemented; legacy export ciphers still unsupported
+- TLS 1.2 static RSA key exchange: server decrypt path implemented; legacy export ciphers unsupported by design
 - HelloRetryRequest: implemented for preferred-group mismatch; stateless cookie is connection-scoped (16-byte random)
 - 0-RTT early data: client send and server decrypt with PSK binder verification; disabled by default (`Server.max_early_data_size = 0`); set `> 0` to accept early data on PSK resume
 - FFDHE2048: implemented (RFC 7919); x448 and secp521r1 are rejected if listed in `named_groups` (awaiting `std.crypto` support)
