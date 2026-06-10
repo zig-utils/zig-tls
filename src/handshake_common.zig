@@ -811,10 +811,19 @@ pub const CertificateParser = struct {
         return true;
     }
 
-    fn validateLeafOcspStaple(h: *const CertificateParser, staple: ?[]const u8, leaf_der: []const u8) !void {
+    fn validateLeafOcspStaple(
+        h: *const CertificateParser,
+        staple: ?[]const u8,
+        leaf_der: []const u8,
+        leaf_issuer_der: ?[]const u8,
+    ) !void {
         if (!h.request_ocsp or h.skip_verify) return;
         const resp = staple orelse return error.TlsBadCertificateStatusResponse;
-        ocsp_mod.validateStaple(resp, leaf_der, h.now_sec) catch return error.TlsBadCertificateStatusResponse;
+        ocsp_mod.validateStaple(resp, leaf_der, .{
+            .now_sec = h.now_sec,
+            .leaf_issuer_der = leaf_issuer_der,
+            .root_ca = h.root_ca,
+        }) catch return error.TlsBadCertificateStatusResponse;
     }
 
     pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
@@ -833,16 +842,18 @@ pub const CertificateParser = struct {
 
         var trust_chain_established = false;
         var last_cert: ?Certificate.Parsed = null;
+        var leaf_ocsp_staple: ?[]const u8 = null;
+        var leaf_der_for_ocsp: ?[]const u8 = null;
+        var leaf_issuer_der: ?[]const u8 = null;
         const certs_len = try d.decode(u24);
         const start_idx = d.idx;
         while (d.idx - start_idx < certs_len) {
             const crt_len = try d.decode(u24);
             const crt = try d.slice(crt_len);
-            var leaf_ocsp_staple: ?[]const u8 = null;
             if (tls_version == .tls_1_3) {
                 const ext_len = try d.decode(u16);
                 const ext_bytes = try d.slice(ext_len);
-                if (last_cert == null) {
+                if (leaf_der_for_ocsp == null) {
                     leaf_ocsp_staple = ocsp_mod.parseTls13StatusRequestExtension(ext_bytes);
                 }
             }
@@ -858,7 +869,6 @@ pub const CertificateParser = struct {
             if (last_cert == null and reuse_leaf and trusted_index != null) {
                 if (!h.skip_verify) {
                     try checkCertValidityCached(h);
-                    try h.validateLeafOcspStaple(leaf_ocsp_staple, crt);
                     trust_chain_established = true;
                 }
                 continue;
@@ -867,6 +877,7 @@ pub const CertificateParser = struct {
             const subject = try parseCertificateSubject(h.root_ca, crt, trusted_index);
             if (last_cert) |pc| {
                 if (pc.verify(subject, h.now_sec)) {
+                    if (leaf_issuer_der == null) leaf_issuer_der = crt;
                     last_cert = subject;
                 } else |err| switch (err) {
                     error.CertificateIssuerMismatch => {
@@ -876,13 +887,13 @@ pub const CertificateParser = struct {
                     else => return err,
                 }
             } else { // first certificate
+                leaf_der_for_ocsp = crt;
                 if (!h.skip_verify and h.host.len > 0) {
                     if (!(h.cached_host_ok and leaf_hash == h.cached_leaf_hash)) {
                         try subject.verifyHostName(h.host);
                         h.cached_host_ok = true;
                     }
                 }
-                try h.validateLeafOcspStaple(leaf_ocsp_staple, crt);
                 if (!reuse_leaf) {
                     h.pub_key = try dupe(&h.pub_key_buf, subject.pubKey());
                     h.pub_key_algo = subject.pub_key_algo;
@@ -914,6 +925,9 @@ pub const CertificateParser = struct {
         }
         if (!h.skip_verify and !trust_chain_established) {
             return error.CertificateIssuerNotFound;
+        }
+        if (leaf_der_for_ocsp) |leaf_der| {
+            try h.validateLeafOcspStaple(leaf_ocsp_staple, leaf_der, leaf_issuer_der);
         }
     }
 
