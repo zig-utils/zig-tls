@@ -66,6 +66,7 @@ pub fn encryptBulk(
     const bulk = @min(in.len, out.len) & ~@as(usize, 15);
     if (bulk == 0) return 0;
     aes_gcm_enc_update_vaes_avx2(in.ptr, out.ptr, bulk, aes_key, ivec, htable, xi);
+    advanceCounter(ivec, bulk);
     return bulk;
 }
 
@@ -80,7 +81,14 @@ pub fn decryptBulk(
     const bulk = @min(in.len, out.len) & ~@as(usize, 15);
     if (bulk == 0) return 0;
     aes_gcm_dec_update_vaes_avx2(in.ptr, out.ptr, bulk, aes_key, ivec, htable, xi);
+    advanceCounter(ivec, bulk);
     return bulk;
+}
+
+fn advanceCounter(ivec: *[16]u8, processed_len: usize) void {
+    const block_count: u32 = @intCast(processed_len / 16);
+    const counter = mem.readInt(u32, ivec[12..16], .big);
+    mem.writeInt(u32, ivec[12..16], counter +% block_count, .big);
 }
 
 pub fn xiFromAcc(acc: u128) [16]u8 {
@@ -98,4 +106,10 @@ pub fn ctrIvec(npub: [12]u8, counter: u32) [16]u8 {
     ivec[0..12].* = npub;
     mem.writeInt(u32, ivec[12..16], counter, .big);
     return ivec;
+}
+
+test "advance counter after stitched blocks" {
+    var ivec = ctrIvec(@splat(0xaa), 2);
+    advanceCounter(&ivec, 16 * 1024);
+    try std.testing.expectEqual(@as(u32, 1026), mem.readInt(u32, ivec[12..16], .big));
 }
