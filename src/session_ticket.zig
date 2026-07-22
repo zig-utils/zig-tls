@@ -35,6 +35,87 @@ pub const TicketKeys = struct {
     }
 };
 
+/// Thread-safe bounded session-ticket key ring.
+///
+/// New tickets always use the active key at index zero. Resumption accepts the
+/// active key and at most three previous keys. Keep the ring at a stable address
+/// for as long as server configurations reference it. Rotation is serialized,
+/// does not require a listener restart, and securely clears retired material.
+pub const TicketKeyRing = struct {
+    pub const capacity = 4;
+
+    mutex: std.atomic.Mutex = .unlocked,
+    keys: [capacity]TicketKeys = undefined,
+    count: u8 = 1,
+
+    pub fn init(primary: TicketKeys) TicketKeyRing {
+        var ring: TicketKeyRing = .{};
+        ring.keys[0] = primary;
+        return ring;
+    }
+
+    pub fn rotate(self: *TicketKeyRing, next: TicketKeys) error{DuplicateKeyName}!void {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+
+        for (self.keys[0..self.count]) |existing| {
+            if (mem.eql(u8, &existing.name, &next.name)) return error.DuplicateKeyName;
+        }
+
+        if (self.count == capacity) secureZeroKeys(&self.keys[capacity - 1]);
+        const retained: usize = @min(self.count, capacity - 1);
+        var index = retained;
+        while (index > 0) : (index -= 1) self.keys[index] = self.keys[index - 1];
+        self.keys[0] = next;
+        if (self.count < capacity) self.count += 1;
+    }
+
+    pub fn active(self: *TicketKeyRing) TicketKeys {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return self.keys[0];
+    }
+
+    pub fn decryptTicket(self: *TicketKeyRing, identity: []const u8) ?SessionState {
+        if (identity.len < 16) return null;
+        var selected: ?TicketKeys = null;
+        lock(&self.mutex);
+        for (self.keys[0..self.count]) |candidate| {
+            if (mem.eql(u8, identity[0..16], &candidate.name)) {
+                selected = candidate;
+                break;
+            }
+        }
+        self.mutex.unlock();
+        return decrypt(identity, selected orelse return null);
+    }
+
+    pub fn keyCount(self: *TicketKeyRing) usize {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return self.count;
+    }
+
+    pub fn containsKeyName(self: *TicketKeyRing, name: *const [16]u8) bool {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        for (self.keys[0..self.count]) |candidate| {
+            if (mem.eql(u8, &candidate.name, name)) return true;
+        }
+        return false;
+    }
+};
+
+fn lock(mutex: *std.atomic.Mutex) void {
+    while (!mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn secureZeroKeys(keys: *TicketKeys) void {
+    crypto.secureZero(u8, &keys.name);
+    crypto.secureZero(u8, &keys.hmac_key);
+    crypto.secureZero(u8, &keys.aes_key);
+}
+
 /// Serialized session state encrypted into a TLS session ticket.
 pub const SessionState = struct {
     tls_version: proto.Version,
@@ -65,11 +146,11 @@ pub fn encrypt(
 ) ![]u8 {
     var plaintext: [128]u8 = undefined;
     var idx: usize = 0;
-    mem.writeInt(u16, plaintext[idx .. idx + 2][0..2], @intFromEnum(state.tls_version), .big);
+    mem.writeInt(u16, plaintext[idx .. idx + 2][0..2], @backingInt(state.tls_version), .big);
     idx += 2;
-    mem.writeInt(u16, plaintext[idx .. idx + 2][0..2], @intFromEnum(state.cipher_suite), .big);
+    mem.writeInt(u16, plaintext[idx .. idx + 2][0..2], @backingInt(state.cipher_suite), .big);
     idx += 2;
-    mem.writeInt(u16, plaintext[idx .. idx + 2][0..2], @intFromEnum(state.named_group), .big);
+    mem.writeInt(u16, plaintext[idx .. idx + 2][0..2], @backingInt(state.named_group), .big);
     idx += 2;
     @memcpy(plaintext[idx .. idx + 48], &state.master_secret);
     idx += 48;
@@ -126,9 +207,9 @@ pub fn decrypt(identity: []const u8, keys: TicketKeys) ?SessionState {
     ) catch return null;
 
     var state: SessionState = undefined;
-    state.tls_version = @enumFromInt(mem.readInt(u16, plaintext[0..2], .big));
-    state.cipher_suite = @enumFromInt(mem.readInt(u16, plaintext[2..4], .big));
-    state.named_group = @enumFromInt(mem.readInt(u16, plaintext[4..6], .big));
+    state.tls_version = @fromBackingInt(@intCast(mem.readInt(u16, plaintext[0..2], .big)));
+    state.cipher_suite = @fromBackingInt(@intCast(mem.readInt(u16, plaintext[2..4], .big)));
+    state.named_group = @fromBackingInt(@intCast(mem.readInt(u16, plaintext[4..6], .big)));
     @memcpy(&state.master_secret, plaintext[6..54]);
     state.session_timeout_secs = mem.readInt(u32, plaintext[54..58], .big);
     const issued_at = mem.readInt(i64, plaintext[58..66], .big);
@@ -176,6 +257,7 @@ pub const ResumeSessionCallback = *const fn (
 /// Server-side session ticket manager.
 pub const Manager = struct {
     keys: TicketKeys,
+    key_ring: ?*TicketKeyRing = null,
     session_timeout_secs: u32 = 300,
     ticket_lifetime_secs: u32 = 7200,
     nonce_buf: [Aes128Gcm.nonce_length]u8 = undefined,
@@ -188,6 +270,10 @@ pub const Manager = struct {
 
     pub fn init(keys: TicketKeys) Manager {
         return .{ .keys = keys };
+    }
+
+    pub fn initKeyRing(key_ring: *TicketKeyRing) Manager {
+        return .{ .keys = undefined, .key_ring = key_ring };
     }
 
     pub fn nextNonce(self: *Manager) []const u8 {
@@ -207,7 +293,8 @@ pub const Manager = struct {
         var state = state_in;
         state.psk_nonce_len = Aes128Gcm.nonce_length;
         @memcpy(&state.psk_nonce, &self.last_psk_nonce);
-        const identity = try encrypt(allocator, self.keys, state, &self.last_enc_nonce);
+        const active_keys = if (self.key_ring) |key_ring| key_ring.active() else self.keys;
+        const identity = try encrypt(allocator, active_keys, state, &self.last_enc_nonce);
         const ticket: Ticket = .{
             .identity = identity,
             .lifetime = self.ticket_lifetime_secs,
@@ -225,6 +312,7 @@ pub const Manager = struct {
         if (self.resume_session_cb) |cb| {
             if (!cb(self.callback_ctx, identity, identity)) return null;
         }
+        if (self.key_ring) |key_ring| return key_ring.decryptTicket(identity);
         return decrypt(identity, self.keys);
     }
 };
@@ -268,4 +356,38 @@ test "encrypt decrypt roundtrip" {
     try testing.expectEqual(state.tls_version, recovered.tls_version);
     try testing.expectEqual(state.cipher_suite, recovered.cipher_suite);
     try testing.expect(mem.eql(u8, &state.master_secret, &recovered.master_secret));
+}
+
+test "ticket key ring resumes across rotation and retires bounded keys" {
+    const first = TicketKeys.random();
+    var ring = TicketKeyRing.init(first);
+    var manager = Manager.initKeyRing(&ring);
+    const state: SessionState = .{
+        .tls_version = .tls_1_3,
+        .cipher_suite = .AES_128_GCM_SHA256,
+        .named_group = .x25519,
+        .master_secret = @as([48]u8, @splat(0x5a)),
+        .session_timeout_secs = 3600,
+    };
+
+    const old_ticket = try manager.issueTicket(testing.allocator, state);
+    defer testing.allocator.free(old_ticket.identity);
+
+    const second = TicketKeys.random();
+    try ring.rotate(second);
+    const new_ticket = try manager.issueTicket(testing.allocator, state);
+    defer testing.allocator.free(new_ticket.identity);
+
+    try testing.expect(manager.resumeTicket(old_ticket.identity) != null);
+    try testing.expect(manager.resumeTicket(new_ticket.identity) != null);
+    try testing.expectEqual(@as(usize, 2), ring.keyCount());
+    try testing.expectError(error.DuplicateKeyName, ring.rotate(second));
+
+    try ring.rotate(TicketKeys.random());
+    try ring.rotate(TicketKeys.random());
+    try ring.rotate(TicketKeys.random());
+    try testing.expectEqual(@as(usize, TicketKeyRing.capacity), ring.keyCount());
+    try testing.expect(!ring.containsKeyName(&first.name));
+    try testing.expect(manager.resumeTicket(old_ticket.identity) == null);
+    try testing.expect(manager.resumeTicket(new_ticket.identity) != null);
 }
