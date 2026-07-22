@@ -17,8 +17,14 @@ pub const U128 = extern struct {
 };
 
 pub fn initAesKey(comptime key_bits: comptime_int, key: *const [key_bits / 8]u8) AesKey {
-    if (aarch64_gcm.enabled) return @bitCast(aarch64_gcm.initAesKey(key_bits, key));
-    if (x86_64_gcm.enabled) return @bitCast(x86_64_gcm.initAesKey(key_bits, key));
+    if (aarch64_gcm.enabled) {
+        const native = aarch64_gcm.initAesKey(key_bits, key);
+        return .{ .rd_key = native.rd_key, .rounds = native.rounds };
+    }
+    if (x86_64_gcm.enabled) {
+        const native = x86_64_gcm.initAesKey(key_bits, key);
+        return .{ .rd_key = native.rd_key, .rounds = native.rounds };
+    }
     _ = .{ key_bits, key };
     @compileError("stitched GCM requires AArch64 or x86_64 with AES");
 }

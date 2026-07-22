@@ -69,7 +69,12 @@ pub fn build(b: *std.Build) void {
     addBedrockCMulBase(b, tls_server_exe, bedrock_c_mul_base);
     b.installArtifact(tls_server_exe);
     const run_tls_server = b.addRunArtifact(tls_server_exe);
-    if (b.args) |args| run_tls_server.addArgs(args);
+    const tls_server_args = b.option(
+        []const []const u8,
+        "tls-server-arg",
+        "Argument passed to tls-server; repeat the option for multiple arguments",
+    ) orelse &.{};
+    run_tls_server.addArgs(tls_server_args);
     const tls_server_step = b.step("tls-server", "Run TLS 1.3 echo server (default :8443)");
     tls_server_step.dependOn(&run_tls_server.step);
 
