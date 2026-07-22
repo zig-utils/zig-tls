@@ -228,7 +228,6 @@ test "0-RTT early data server decrypt" {
 }
 
 test "interop: TLS 1.3 cert handshake with OCSP staple" {
-
     const testing = @import("std").testing;
     const allocator = testing.allocator;
     const ocsp = [_]u8{ 0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00 };

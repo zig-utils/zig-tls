@@ -635,7 +635,7 @@ pub const CertificateParser = struct {
     pub_key_buf: [1038]u8 = undefined,
     pub_key: []const u8 = undefined,
 
-    signature_scheme: proto.SignatureScheme = @enumFromInt(0),
+    signature_scheme: proto.SignatureScheme = @fromBackingInt(@intCast(0)),
     signature_buf: [1024]u8 = undefined,
     signature: []const u8 = undefined,
 
@@ -1327,7 +1327,7 @@ test "TLS 1.3 certificate staples OCSP on leaf entry" {
     const ext_list_len: u16 = @intCast(4 + ocsp.len);
     var needle: [max_ocsp_staple_len + 8]u8 = undefined;
     std.mem.writeInt(u16, needle[0..2], ext_list_len, .big);
-    std.mem.writeInt(u16, needle[2..4], @intFromEnum(proto.Extension.status_request), .big);
+    std.mem.writeInt(u16, needle[2..4], @backingInt(proto.Extension.status_request), .big);
     std.mem.writeInt(u16, needle[4..6], @intCast(ocsp.len), .big);
     @memcpy(needle[6..][0..ocsp.len], &ocsp);
     try testing.expect(std.mem.indexOf(u8, msg, needle[0 .. 6 + ocsp.len]) != null);

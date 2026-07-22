@@ -1,9 +1,8 @@
 .{
     .name = .zig_tls,
     .version = "0.1.1",
-    .minimum_zig_version = "0.17.0-dev.56+a8226cd53",
+    .minimum_zig_version = "0.17.0-dev.1441+d5181a9c9",
     .fingerprint = 0x114f7e81e404070b,
-    .dependencies = .{},
     .paths = .{
         "README.md",
         "LICENSE",

@@ -612,7 +612,7 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             if (&cleartext[0] != &buf[record.header_len]) {
                 @memcpy(buf[record.header_len..][0..cleartext.len], cleartext);
             }
-            buf[record.header_len + cleartext.len] = @intFromEnum(content_type);
+            buf[record.header_len + cleartext.len] = @backingInt(content_type);
             const ciphertext = buf[record.header_len..][0 .. cleartext.len + 1];
             const auth_tag = buf[record.header_len + ciphertext.len ..][0..auth_tag_len];
 
@@ -641,13 +641,13 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
 
             const payload_len_u16: u16 = @intCast(payload_len);
             if (self.cached_app_payload_len != payload_len_u16) {
-                buf[0] = @intFromEnum(proto.ContentType.application_data);
+                buf[0] = @backingInt(proto.ContentType.application_data);
                 buf[1] = 0x03;
                 buf[2] = 0x03;
                 mem.writeInt(u16, buf[3..5], payload_len_u16, .big);
                 self.cached_app_payload_len = payload_len_u16;
             }
-            buf[record.header_len + cleartext_len] = @intFromEnum(proto.ContentType.application_data);
+            buf[record.header_len + cleartext_len] = @backingInt(proto.ContentType.application_data);
 
             const ciphertext = buf[record.header_len..][0 .. cleartext_len + 1];
             const auth_tag = buf[record.header_len + ciphertext.len ..][0..auth_tag_len];
@@ -696,7 +696,7 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             // TLS 1.3 records from this stack place content type immediately after cleartext.
             const content_type_idx = ciphertext_len - 1;
             const cleartext = buf[0..content_type_idx];
-            const content_type: proto.ContentType = @enumFromInt(buf[content_type_idx]);
+            const content_type: proto.ContentType = @fromBackingInt(@intCast(buf[content_type_idx]));
             self.decrypt_seq +%= 1;
             return .{ content_type, cleartext };
         }

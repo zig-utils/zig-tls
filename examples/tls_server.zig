@@ -37,7 +37,7 @@ fn handleConnection(io: Io, stream: *const net.Stream, cert_key: *tls.config.Cer
     var conn = try tls.server(&reader.interface, &writer.interface, .{
         .auth = cert_key,
         .cipher_suites = tls.config.cipher_suites.secure,
-        .named_groups = &[_]tls.config.NamedGroup{ .x25519 },
+        .named_groups = &[_]tls.config.NamedGroup{.x25519},
         .min_version = .tls_1_3,
         .max_version = .tls_1_3,
     });

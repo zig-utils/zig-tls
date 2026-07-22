@@ -37,7 +37,7 @@ pub fn parseTls13StatusRequestExtension(ext_list: []const u8) ?[]const u8 {
         if (idx + ext_len > ext_list.len) return null;
         const body = ext_list[idx .. idx + ext_len];
         idx += ext_len;
-        if (@as(u16, @intFromEnum(@import("protocol.zig").Extension.status_request)) == ext_type) {
+        if (@as(u16, @backingInt(@import("protocol.zig").Extension.status_request)) == ext_type) {
             // TLS 1.3: body is opaque OCSPResponse (no status_type wrapper).
             return body;
         }
