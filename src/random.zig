@@ -27,7 +27,12 @@ pub fn fill(buf: []u8) void {
 
 fn urandomFill(buf: []u8) void {
     const fd = std.posix.openat(std.posix.AT.FDCWD, "/dev/urandom", .{ .ACCMODE = .RDONLY }, 0) catch return;
-    defer std.posix.close(fd);
+    defer {
+        if (builtin.os.tag == .linux)
+            _ = std.os.linux.close(fd)
+        else
+            _ = std.c.close(fd);
+    }
     var pos: usize = 0;
     while (pos < buf.len) {
         const n = std.posix.read(fd, buf[pos..]) catch return;

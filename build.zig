@@ -14,6 +14,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    tls_module.link_libc = true;
+    tls_module.pic = true;
     tls_module.addOptions("build_options", build_options);
     addHwCryptoAsm(b, tls_module, target);
 
@@ -23,6 +25,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib_mod.link_libc = true;
+    lib_mod.pic = true;
     lib_mod.addOptions("build_options", build_options);
     addHwCryptoAsm(b, lib_mod, target);
     const unit_tests = b.addTest(.{
@@ -39,6 +43,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    bench_mod.link_libc = true;
+    bench_mod.pic = true;
     bench_mod.addImport("tls", tls_module);
     const bench_exe = b.addExecutable(.{
         .name = "bench",
