@@ -13,13 +13,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        zig-version: ['0.17.0-dev.1441+d5181a9c9']
+        zig-version: ['0.17.0-dev.1476+91a29d707']
       fail-fast: false
     steps:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: '0.17.0-dev.1441+d5181a9c9'
+          version: '0.17.0-dev.1476+91a29d707'
       - run: zig build
       - run: zig build test
 
@@ -30,5 +30,5 @@ jobs:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2
         with:
-          version: '0.17.0-dev.1441+d5181a9c9'
+          version: '0.17.0-dev.1476+91a29d707'
       - run: zig fmt --check .

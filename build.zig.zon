@@ -1,7 +1,7 @@
 .{
     .name = .zig_tls,
     .version = "0.1.1",
-    .minimum_zig_version = "0.17.0-dev.1441+d5181a9c9",
+    .minimum_zig_version = "0.17.0-dev.1476+91a29d707",
     .fingerprint = 0x114f7e81e404070b,
     .paths = .{
         "README.md",
