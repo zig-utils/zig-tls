@@ -6,12 +6,12 @@ const certs = @import("certs.zig");
 const crypto_bench = @import("crypto_bench.zig");
 
 pub const std_options: std.Options = .{
-    .log_level = if (builtin.mode == .Debug) .warn else .err,
+    .log_level = if (builtin.mode == .debug) .warn else .err,
 };
 
-const iterations: u32 = if (builtin.mode == .Debug) 100 else 10_000;
+const iterations: u32 = if (builtin.mode == .debug) 100 else 10_000;
 const transfer_bytes: usize = 16 * 1024;
-const transfer_iterations: u32 = if (builtin.mode == .Debug) 50 else 5_000;
+const transfer_iterations: u32 = if (builtin.mode == .debug) 50 else 5_000;
 
 const bench_groups = &[_]tls.config.NamedGroup{.x25519};
 

@@ -5,7 +5,7 @@ const crypto = std.crypto;
 const tls = @import("tls");
 const ecdsa = tls.ecdsa_p256;
 
-const crypto_iterations: u32 = if (@import("builtin").mode == .Debug) 1_000 else 100_000;
+const crypto_iterations: u32 = if (@import("builtin").mode == .debug) 1_000 else 100_000;
 const handshake_record_len: usize = 2048;
 
 pub fn run(
