@@ -102,7 +102,7 @@ pub const Parser = struct {
     pub fn expectEnum(self: *Parser, comptime Enum: type) Error!Enum {
         const oid = try self.expectOid();
         return Enum.oids.get(oid) orelse {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 var buf: [256]u8 = undefined;
                 var stream = std.io.fixedBufferStream(&buf);
                 try @import("./oid.zig").decode(oid, stream.writer());

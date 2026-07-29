@@ -90,7 +90,7 @@ pub fn build(b: *std.Build) void {
         const record_fuzz_mod = b.createModule(.{
             .root_source_file = b.path("fuzz/record_fuzz.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
         record_fuzz_mod.addImport("tls", tls_module);
         const record_fuzz = b.addExecutable(.{
@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
         const handshake_fuzz_mod = b.createModule(.{
             .root_source_file = b.path("fuzz/handshake_fuzz.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
         handshake_fuzz_mod.addImport("tls", tls_module);
         const handshake_fuzz = b.addExecutable(.{
