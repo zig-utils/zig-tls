@@ -9,6 +9,8 @@ const Certificate = crypto.Certificate;
 const Cipher = @import("cipher.zig").Cipher;
 const CipherSuite = @import("cipher.zig").CipherSuite;
 const max_ciphertext_record_len = @import("cipher.zig").max_ciphertext_record_len;
+const max_certificate_msg_len = @import("cipher.zig").max_certificate_msg_len;
+const max_handshake_flight_len = @import("cipher.zig").max_handshake_flight_len;
 const cipher_suites = @import("cipher.zig").cipher_suites;
 const max_cleartext_len = @import("cipher.zig").max_cleartext_len;
 
@@ -757,7 +759,7 @@ pub const Handshake = struct {
         }
         try w.record(.change_cipher_spec, &[_]u8{1});
         {
-            var flight_buf: [4096]u8 = undefined;
+            var flight_buf: [max_handshake_flight_len]u8 = undefined;
             var flight_len: usize = 0;
             const appendMsg = struct {
                 fn append(buf: []u8, len: *usize, msg: []const u8) !void {
@@ -804,7 +806,7 @@ pub const Handshake = struct {
                     .side = .server,
                     .ocsp_response = opt.ocsp_response,
                 };
-                var cert_msg: [1024]u8 = undefined;
+                var cert_msg: [max_certificate_msg_len]u8 = undefined;
                 var cert_hw = record.Writer.init(&cert_msg);
                 try cb.makeCertificate(&cert_hw);
                 try appendMsg(&flight_buf, &flight_len, cert_hw.buffered());
@@ -1552,3 +1554,28 @@ pub const NonBlock = struct {
         return self.inner.early_data;
     }
 };
+
+/// A Certificate message has to fit a chain from a public CA, not just the
+/// self-signed leaf that tests are built around.
+///
+/// The regression: the buffer was 1024 bytes, which holds a single small leaf
+/// and nothing else. A Let's Encrypt leaf plus its intermediate is several KB
+/// of DER, so every handshake against a real deployed certificate died with
+/// error.OutputBufferUndersize - and the error says nothing about certificates,
+/// so it reads as a transport fault. It cost a mail server its TLS.
+test "certificate buffers fit a real CA chain" {
+    const cipher_mod = @import("cipher.zig");
+
+    // A Let's Encrypt leaf + intermediate is roughly 3.5KB of DER; a chain with
+    // a cross-signed root is larger. Anything sized below this is sized for the
+    // test fixture rather than for what gets deployed.
+    const realistic_chain_der = 4096;
+
+    try std.testing.expect(cipher_mod.max_certificate_msg_len >= realistic_chain_der);
+    try std.testing.expect(max_certificate_msg_len >= realistic_chain_der);
+
+    // The flight carries the certificate plus EncryptedExtensions,
+    // CertificateVerify and Finished, so it cannot be smaller than the
+    // certificate it has to contain.
+    try std.testing.expect(max_handshake_flight_len >= max_certificate_msg_len);
+}

@@ -54,6 +54,26 @@ pub const max_cleartext_len = 1 << 14;
 pub const max_ciphertext_len = max_cleartext_len + 256;
 pub const max_ciphertext_record_len = record.header_len + max_ciphertext_len;
 
+/// Room for a Certificate handshake message carrying a real chain.
+///
+/// A single self-signed leaf fits in a few hundred bytes, which is why a small
+/// buffer survives every test that uses one. A chain issued by a public CA does
+/// not: a Let's Encrypt leaf plus its intermediate is several KB of DER, and
+/// anything with a cross-signed root is larger again. Sizing this for the
+/// convenient case makes the handshake fail against exactly the certificates
+/// people deploy, with `error.OutputBufferUndersize` and no hint that the
+/// certificate is the reason.
+///
+/// A record's cleartext limit is the natural bound: a message longer than this
+/// has to be fragmented across records regardless of buffer size.
+pub const max_certificate_msg_len = max_cleartext_len;
+
+/// Room for a whole server flight: EncryptedExtensions, an optional
+/// CertificateRequest, Certificate, CertificateVerify and Finished. The
+/// certificate dominates it, so this has to scale with the same bound rather
+/// than assume a small one.
+pub const max_handshake_flight_len = max_cleartext_len;
+
 /// Avoid large stack frames in nested TLS 1.2 CBC decrypt paths.
 threadlocal var tls12_decrypt_scratch: [max_ciphertext_len]u8 = undefined;
 // max ciphertext produced with this implementation ()

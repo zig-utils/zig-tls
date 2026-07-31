@@ -20,6 +20,8 @@ const CipherSuite = @import("cipher.zig").CipherSuite;
 const cipher_suites = @import("cipher.zig").cipher_suites;
 const max_cleartext_len = @import("cipher.zig").max_cleartext_len;
 const max_ciphertext_record_len = @import("cipher.zig").max_ciphertext_record_len;
+const max_certificate_msg_len = @import("cipher.zig").max_certificate_msg_len;
+const max_handshake_flight_len = @import("cipher.zig").max_handshake_flight_len;
 
 const Transcript = @import("transcript.zig").Transcript;
 const record = @import("record.zig");
@@ -997,7 +999,7 @@ pub const Handshake = struct {
 
         try w.record(.change_cipher_spec, &[_]u8{1});
 
-        var flight_buf: [4096]u8 = undefined;
+        var flight_buf: [max_handshake_flight_len]u8 = undefined;
         var flight_len: usize = 0;
         const appendMsg = struct {
             fn append(buf: []u8, len: *usize, msg: []const u8) !void {
@@ -1010,7 +1012,7 @@ pub const Handshake = struct {
         if (h.client_certificate_requested) {
             if (auth) |a| {
                 const cb = h.certificateBuilder(a);
-                var cert_msg: [1024]u8 = undefined;
+                var cert_msg: [max_certificate_msg_len]u8 = undefined;
                 var cert_hw = record.Writer.init(&cert_msg);
                 try cb.makeCertificate(&cert_hw);
                 try appendMsg(&flight_buf, &flight_len, cert_hw.buffered());
