@@ -1555,14 +1555,14 @@ pub const NonBlock = struct {
     }
 };
 
-/// A Certificate message has to fit a chain from a public CA, not just the
-/// self-signed leaf that tests are built around.
-///
-/// The regression: the buffer was 1024 bytes, which holds a single small leaf
-/// and nothing else. A Let's Encrypt leaf plus its intermediate is several KB
-/// of DER, so every handshake against a real deployed certificate died with
-/// error.OutputBufferUndersize - and the error says nothing about certificates,
-/// so it reads as a transport fault. It cost a mail server its TLS.
+// A Certificate message has to fit a chain from a public CA, not just the
+// self-signed leaf that tests are built around.
+//
+// The regression: the buffer was 1024 bytes, which holds a single small leaf
+// and nothing else. A Let's Encrypt leaf plus its intermediate is several KB
+// of DER, so every handshake against a real deployed certificate died with
+// error.OutputBufferUndersize - and the error says nothing about certificates,
+// so it reads as a transport fault. It cost a mail server its TLS.
 test "certificate buffers fit a real CA chain" {
     const cipher_mod = @import("cipher.zig");
 
