@@ -1344,3 +1344,4 @@ test "DhKeyPair.x25519" {
     var kp = try DhKeyPair.init(seed, &.{.x25519});
     try testing.expectEqualSlices(u8, expected, try kp.sharedKey(.x25519, server_pub_key));
 }
+

@@ -230,14 +230,23 @@ pub fn signatureToDerTls(sig: Signature, buf: *[Signature.der_encoded_length_max
         buf[36] = 0x02;
         buf[37] = 0x20;
         @memcpy(buf[38..70], &sig.s);
-        return buf[0..72];
+        // 70, not 72: SEQUENCE header (2) + INTEGER r (2 + 32) + INTEGER s
+        // (2 + 32). The declared SEQUENCE length above is 0x44 = 68 = 70 - 2,
+        // so returning 72 appends two uninitialised bytes after a structure
+        // that says it has ended. This library's own parser accepted the
+        // 72-byte form, so it agreed with itself and every round-trip test
+        // passed - while OpenSSL and every other stack rejected the trailing
+        // garbage and the handshake died as BAD_SIGNATURE.
+        return buf[0..70];
     }
     return sig.toDer(buf);
 }
 
 /// Parse a TLS CertificateVerify ECDSA-P256 signature without the generic DER reader.
 pub fn signatureFromDerTls(der: []const u8) EncodingError!Signature {
-    if (der.len == 72 and der[0] == 0x30 and der[1] == 0x44 and der[2] == 0x02 and der[3] == 0x20 and der[36] == 0x02 and der[37] == 0x20) {
+    // 70 is the correct length; 72 is tolerated so a peer still running the
+    // older encoder stays interoperable.
+    if ((der.len == 70 or der.len == 72) and der[0] == 0x30 and der[1] == 0x44 and der[2] == 0x02 and der[3] == 0x20 and der[36] == 0x02 and der[37] == 0x20) {
         var sig: Signature = undefined;
         @memcpy(sig.r[0..32], der[4..36]);
         @memcpy(sig.s[0..32], der[38..70]);
@@ -356,4 +365,48 @@ test "hw P-256 ECDSA sign and verify roundtrip" {
     const msg = "TLS 1.3, server CertificateVerify";
     const sig = try kp.sign(msg, null);
     try sig.verify(msg, kp.public_key);
+}
+
+// The fast DER encoder has to agree with the length it declares, and with
+// every other TLS stack - not merely with this library's own parser.
+//
+// It returned 72 bytes for a structure whose SEQUENCE header says 68 (so 70
+// total), leaving two uninitialised bytes past the end. signatureFromDerTls
+// accepted that form, so encode/decode round-tripped here and the defect was
+// invisible in-tree. OpenSSL rejects trailing garbage, so every TLS 1.3
+// handshake using a P-256 certificate failed with BAD_SIGNATURE, reported by
+// the peer as a decrypt_error alert that names nothing useful.
+test "fast P-256 DER signature is exactly as long as it claims" {
+    const testing = std.testing;
+
+    var sig: Signature = undefined;
+    // High bit clear in both, so the fast path is taken.
+    @memset(&sig.r, 0x11);
+    @memset(&sig.s, 0x22);
+
+    var buf: [Signature.der_encoded_length_max]u8 = undefined;
+    const der = signatureToDerTls(sig, &buf);
+
+    try testing.expectEqual(@as(usize, 70), der.len);
+    try testing.expectEqual(@as(u8, 0x30), der[0]);
+    // A DER SEQUENCE's length field counts every byte after it.
+    try testing.expectEqual(der.len - 2, @as(usize, der[1]));
+
+    // And it must survive the generic reader, which is what a peer uses.
+    const parsed = try Signature.fromDer(der);
+    try testing.expectEqualSlices(u8, &sig.r, &parsed.r);
+    try testing.expectEqualSlices(u8, &sig.s, &parsed.s);
+}
+
+test "P-256 DER round-trips through the fast parser" {
+    const testing = std.testing;
+    var sig: Signature = undefined;
+    @memset(&sig.r, 0x11);
+    @memset(&sig.s, 0x22);
+
+    var buf: [Signature.der_encoded_length_max]u8 = undefined;
+    const parsed = try signatureFromDerTls(signatureToDerTls(sig, &buf));
+
+    try testing.expectEqualSlices(u8, &sig.r, &parsed.r);
+    try testing.expectEqualSlices(u8, &sig.s, &parsed.s);
 }
