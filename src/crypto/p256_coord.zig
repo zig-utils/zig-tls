@@ -93,7 +93,7 @@ pub fn halve(out: *Coord, x: Coord) void {
 }
 
 pub fn mul(out: *Coord, x: Coord, y: Coord) void {
-    if (!@inComptime() and hw.enabled) {
+    if (!@inComptime() and hw.field_enabled) {
         hw.mul(out, x, y);
     } else {
         fiat.mul(out, x, y);
@@ -101,7 +101,7 @@ pub fn mul(out: *Coord, x: Coord, y: Coord) void {
 }
 
 pub fn sqr(out: *Coord, x: Coord) void {
-    if (!@inComptime() and hw.enabled) {
+    if (!@inComptime() and hw.field_enabled) {
         hw.square(out, x);
     } else {
         fiat.square(out, x);
@@ -177,7 +177,7 @@ pub fn addMixedAffineOrDouble(out: *[3]Coord, p: [3]Coord, q: [2]Coord) void {
 const std = @import("std");
 
 test "hw mul matches fiat mul" {
-    if (!hw.enabled) return error.SkipZigTest;
+    if (!hw.field_enabled) return error.SkipZigTest;
 
     var one: fiat.MontgomeryDomainFieldElement = undefined;
     fiat.setOne(&one);

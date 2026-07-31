@@ -410,3 +410,58 @@ test "P-256 DER round-trips through the fast parser" {
     try testing.expectEqualSlices(u8, &sig.r, &parsed.r);
     try testing.expectEqualSlices(u8, &sig.s, &parsed.s);
 }
+
+// Signatures this module produces must verify under an independent P-256
+// implementation, not merely under its own verifier. A defect shared by the
+// signer and the verifier is invisible to a round-trip test and shows up only
+// as a peer rejecting the handshake.
+test "custom P-256 signing verifies under std's implementation" {
+    const testing = std.testing;
+    const StdEcdsa = crypto.sign.ecdsa.EcdsaP256Sha256;
+    const Sha256 = crypto.hash.sha2.Sha256;
+
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(@splat(0x37));
+    const msg = "certificate-verify-content";
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(msg, &digest, .{});
+
+    const sig = try signPrehashed(kp, digest, null, null);
+
+    const sec1 = kp.public_key.toUncompressedSec1();
+    const std_pub = try StdEcdsa.PublicKey.fromSec1(&sec1);
+    const std_sig = StdEcdsa.Signature{ .r = sig.r, .s = sig.s };
+    var verifier = try std_sig.verifier(std_pub);
+    // std hashes the message itself, arriving at the same digest we signed.
+    verifier.update(msg);
+    verifier.verify() catch |err| {
+        std.debug.print("\ncustom signature REJECTED by std: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    _ = testing;
+}
+
+// The cached-scalar signer is the one a server actually uses once it has
+// warmed its key, and it must agree with an independent implementation just as
+// the uncached one does. Testing only signPrehashed leaves the hot path
+// unverified, which is exactly where a wrong signature hides.
+test "cached-scalar P-256 signing verifies under std's implementation" {
+    const StdEcdsa = crypto.sign.ecdsa.EcdsaP256Sha256;
+    const Sha256 = crypto.hash.sha2.Sha256;
+
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(@splat(0x51));
+    const msg = "certificate-verify-content-cached";
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(msg, &digest, .{});
+
+    const d = try P256.scalar.Scalar.fromBytes(kp.secret_key.bytes, .big);
+    const sig = try signCertificateVerifyTls(kp.secret_key.bytes, digest, d);
+
+    const sec1 = kp.public_key.toUncompressedSec1();
+    const std_pub = try StdEcdsa.PublicKey.fromSec1(&sec1);
+    var verifier = try (StdEcdsa.Signature{ .r = sig.r, .s = sig.s }).verifier(std_pub);
+    verifier.update(msg);
+    verifier.verify() catch |err| {
+        std.debug.print("\ncached-scalar signature REJECTED by std: {s}\n", .{@errorName(err)});
+        return err;
+    };
+}
