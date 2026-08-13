@@ -638,7 +638,16 @@ pub const NonBlock = struct {
     } {
         defer self.reset();
         var input: Io.Reader = .fixed(ciphertext);
+        // Connection.next() sends a TLS alert before returning protocol or
+        // authentication errors. NonBlock callers provide ciphertext as a
+        // slice rather than a stream writer, but the alert path still needs a
+        // valid writer while decrypt() is running. Keep a small discard buffer
+        // attached so malformed peer records return an error instead of
+        // dereferencing the intentionally-unset output pointer.
+        var alert_buf: [128]u8 = undefined;
+        var output: Io.Writer = .fixed(&alert_buf);
         self.inner.input = &input;
+        self.inner.output = &output;
 
         var n: usize = 0;
         while (n < cleartext.len) {
@@ -706,4 +715,16 @@ test "nonblock decrypt" {
 
     const res = try conn.decrypt(&ciphertext, &cleartext_buf);
     try testing.expectEqualSlices(u8, "ping", res.cleartext);
+}
+
+test "nonblock decrypt returns authentication errors" {
+    const data13 = @import("testdata/tls13.zig");
+    _, const server_cipher = cipher.testCiphers();
+    var conn = NonBlock.init(server_cipher);
+
+    var ciphertext = data13.client_ping_wrapped;
+    ciphertext[ciphertext.len - 1] ^= 1;
+    var cleartext_buf: [32]u8 = undefined;
+
+    try testing.expectError(error.TlsBadRecordMac, conn.decrypt(&ciphertext, &cleartext_buf));
 }
