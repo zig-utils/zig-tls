@@ -40,7 +40,7 @@ const CertKeyPair = common.CertKeyPair;
 const cert = common.cert;
 
 const alpn = @import("alpn.zig");
-const log = if (builtin.mode == .debug) std.log.scoped(.tls) else struct {
+const log = if (builtin.mode == .Debug) std.log.scoped(.tls) else struct {
     pub fn info(comptime _: []const u8, _: anytype) void {}
     pub fn err(comptime _: []const u8, _: anytype) void {}
     pub fn warn(comptime _: []const u8, _: anytype) void {}
