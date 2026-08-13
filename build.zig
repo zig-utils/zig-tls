@@ -4,9 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const bedrock_c_mul_base = b.option(bool, "bedrock-c-mul-base", "Link Bedrock C P-256 mul_base") orelse false;
+    // Zig's Mach-O linker currently rejects a relocation emitted by the
+    // generated x86_64 P-256 assembly. Keep that target on the portable Zig
+    // implementation until the assembler output can be linked reliably.
+    const hw_crypto_asm = !(target.result.cpu.arch == .x86_64 and target.result.os.tag == .macos);
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "bedrock_c_mul_base", bedrock_c_mul_base);
+    build_options.addOption(bool, "hw_crypto_asm", hw_crypto_asm);
 
     // Main TLS module
     const tls_module = b.addModule("tls", .{
@@ -17,7 +22,7 @@ pub fn build(b: *std.Build) void {
     tls_module.link_libc = true;
     tls_module.pic = true;
     tls_module.addOptions("build_options", build_options);
-    addHwCryptoAsm(b, tls_module, target);
+    if (hw_crypto_asm) addHwCryptoAsm(b, tls_module, target);
 
     // Unit tests
     const lib_mod = b.createModule(.{
@@ -28,7 +33,7 @@ pub fn build(b: *std.Build) void {
     lib_mod.link_libc = true;
     lib_mod.pic = true;
     lib_mod.addOptions("build_options", build_options);
-    addHwCryptoAsm(b, lib_mod, target);
+    if (hw_crypto_asm) addHwCryptoAsm(b, lib_mod, target);
     const unit_tests = b.addTest(.{
         .root_module = lib_mod,
     });

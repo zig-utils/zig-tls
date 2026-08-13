@@ -2,6 +2,7 @@
 const builtin = @import("builtin");
 
 pub const enabled = builtin.cpu.arch == .x86_64 and
+    @import("build_options").hw_crypto_asm and
     (builtin.os.tag == .macos or builtin.os.tag == .linux);
 
 const use_adx = enabled and builtin.cpu.hasAll(.x86, &.{ .adx, .bmi2 });

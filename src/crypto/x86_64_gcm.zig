@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const mem = std.mem;
 
 pub const enabled = builtin.cpu.arch == .x86_64 and
+    @import("build_options").hw_crypto_asm and
     builtin.cpu.has(.x86, .aes) and
     builtin.cpu.has(.x86, .pclmul) and
     builtin.cpu.has(.x86, .avx2) and

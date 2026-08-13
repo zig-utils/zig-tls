@@ -2,6 +2,7 @@
 const builtin = @import("builtin");
 
 pub const enabled = builtin.cpu.arch == .aarch64 and
+    @import("build_options").hw_crypto_asm and
     (builtin.os.tag == .macos or builtin.os.tag == .linux);
 
 pub const Limb = u64;
