@@ -30,7 +30,8 @@ const cert = common.cert;
 const rng = @import("random.zig");
 const alpn = @import("alpn.zig");
 const session_ticket = @import("session_ticket.zig");
-const log = if (builtin.mode == .Debug) std.log.scoped(.tls) else struct {
+const is_debug_mode = std.mem.eql(u8, @tagName(builtin.mode), "Debug") or std.mem.eql(u8, @tagName(builtin.mode), "debug");
+const log = if (is_debug_mode) std.log.scoped(.tls) else struct {
     pub fn info(comptime _: []const u8, _: anytype) void {}
     pub fn err(comptime _: []const u8, _: anytype) void {}
     pub fn warn(comptime _: []const u8, _: anytype) void {}
