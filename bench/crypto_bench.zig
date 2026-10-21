@@ -5,7 +5,7 @@ const crypto = std.crypto;
 const tls = @import("tls");
 const ecdsa = tls.ecdsa_p256;
 
-const crypto_iterations: u32 = if (@import("builtin").mode == .debug) 1_000 else 100_000;
+const crypto_iterations: u32 = if (std.ascii.eqlIgnoreCase(@tagName(@import("builtin").mode), "debug")) 1_000 else 100_000;
 const handshake_record_len: usize = 2048;
 
 pub fn run(
@@ -55,7 +55,8 @@ pub fn run(
 
     var x25519_seed: [32]u8 = undefined;
     @memset(&x25519_seed, 0x55);
-    const x25519_kp = crypto.dh.X25519.KeyPair.generateDeterministic(x25519_seed) catch unreachable;
+    const generated = crypto.dh.X25519.KeyPair.generateDeterministic(x25519_seed);
+    const x25519_kp = if (@typeInfo(@TypeOf(generated)) == .error_union) generated catch unreachable else generated;
     const server_pk: [32]u8 = @splat(0x66);
     i = 0;
     while (i < 64) : (i += 1) {
