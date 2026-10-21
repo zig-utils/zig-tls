@@ -5,6 +5,11 @@ const crypto = std.crypto;
 const tls = @import("tls");
 const ecdsa = tls.ecdsa_p256;
 
+fn recoverX25519PublicKey(seed: [32]u8) [32]u8 {
+    const recovered = crypto.dh.X25519.recoverPublicKey(seed);
+    return if (@typeInfo(@TypeOf(recovered)) == .error_union) recovered catch unreachable else recovered;
+}
+
 const crypto_iterations: u32 = if (std.ascii.eqlIgnoreCase(@tagName(@import("builtin").mode), "debug")) 1_000 else 100_000;
 const handshake_record_len: usize = 2048;
 
@@ -84,12 +89,12 @@ pub fn run(
 
     i = 0;
     while (i < 64) : (i += 1) {
-        std.mem.doNotOptimizeAway(crypto.dh.X25519.recoverPublicKey(x25519_seed) catch unreachable);
+        std.mem.doNotOptimizeAway(recoverX25519PublicKey(x25519_seed));
     }
     start = Io.Clock.awake.now(io).nanoseconds;
     i = 0;
     while (i < crypto_iterations) : (i += 1) {
-        std.mem.doNotOptimizeAway(crypto.dh.X25519.recoverPublicKey(x25519_seed) catch unreachable);
+        std.mem.doNotOptimizeAway(recoverX25519PublicKey(x25519_seed));
     }
     const x25519_keygen_ladder_rate = rate(crypto_iterations, Io.Clock.awake.now(io).nanoseconds - start);
     try w.print("{s:<50} {d:>10.0} /s\n", .{ "X25519 keygen (ladder)", x25519_keygen_ladder_rate });
