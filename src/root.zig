@@ -395,4 +395,5 @@ test {
     _ = @import("aes_gcm_cached.zig");
     _ = @import("tls_hkdf.zig");
     _ = @import("crypto/x25519_base.zig");
+    _ = @import("crypto/ecdsa_p256.zig");
 }
