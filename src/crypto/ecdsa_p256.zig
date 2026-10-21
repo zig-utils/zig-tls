@@ -219,27 +219,37 @@ fn parseTlsDerP256(der: []const u8, sig: *Signature) bool {
     return i == der.len;
 }
 
-/// Encode a TLS CertificateVerify ECDSA-P256 signature (fixed 72-byte layout when canonical).
+/// DER INTEGERs must have minimal signed encodings, including short scalars.
 pub fn signatureToDerTls(sig: Signature, buf: *[Signature.der_encoded_length_max]u8) []const u8 {
-    if (sig.r[0] < 0x80 and sig.s[0] < 0x80) {
-        buf[0] = 0x30;
-        buf[1] = 0x44;
-        buf[2] = 0x02;
-        buf[3] = 0x20;
-        @memcpy(buf[4..36], &sig.r);
-        buf[36] = 0x02;
-        buf[37] = 0x20;
-        @memcpy(buf[38..70], &sig.s);
-        // 70, not 72: SEQUENCE header (2) + INTEGER r (2 + 32) + INTEGER s
-        // (2 + 32). The declared SEQUENCE length above is 0x44 = 68 = 70 - 2,
-        // so returning 72 appends two uninitialised bytes after a structure
-        // that says it has ended. This library's own parser accepted the
-        // 72-byte form, so it agreed with itself and every round-trip test
-        // passed - while OpenSSL and every other stack rejected the trailing
-        // garbage and the handshake died as BAD_SIGNATURE.
-        return buf[0..70];
-    }
     return sig.toDer(buf);
+}
+
+test "TLS signature DER removes redundant leading zeros in either scalar" {
+    for ([_]u8{ 0, 1, 0x7f, 0x80, 0xff }) |first| {
+        for ([_]u8{ 0, 1, 0x7f, 0x80, 0xff }) |second| {
+            var sig = Signature{ .r = @splat(0x42), .s = @splat(0x43) };
+            sig.r[0] = first;
+            sig.r[1] = second;
+            sig.s[0] = second;
+            sig.s[1] = first;
+            var actual_buf: [Signature.der_encoded_length_max]u8 = undefined;
+            var expected_buf: [Signature.der_encoded_length_max]u8 = undefined;
+            const actual = signatureToDerTls(sig, &actual_buf);
+            try std.testing.expectEqualSlices(u8, sig.toDer(&expected_buf), actual);
+            var offset: usize = 2;
+            for (0..2) |_| {
+                try std.testing.expectEqual(@as(u8, 2), actual[offset]);
+                const size = actual[offset + 1];
+                const integer = actual[offset + 2 ..][0..size];
+                // A zero prefix is allowed only when it prevents a negative INTEGER.
+                if (integer.len > 1 and integer[0] == 0)
+                    try std.testing.expect(integer[1] >= 0x80);
+                try std.testing.expect(integer[0] < 0x80);
+                offset += size + 2;
+            }
+            try std.testing.expectEqual(actual.len, offset);
+        }
+    }
 }
 
 /// Parse a TLS CertificateVerify ECDSA-P256 signature without the generic DER reader.
