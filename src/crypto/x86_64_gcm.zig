@@ -8,6 +8,10 @@ pub const enabled = builtin.cpu.arch == .x86_64 and
     builtin.cpu.has(.x86, .aes) and
     builtin.cpu.has(.x86, .pclmul) and
     builtin.cpu.has(.x86, .avx2) and
+    // These kernels use vector AES and vector carry-less multiplication;
+    // AVX2 alone does not imply either instruction set (e.g. older EPYC).
+    builtin.cpu.has(.x86, .vaes) and
+    builtin.cpu.has(.x86, .vpclmulqdq) and
     (builtin.os.tag == .linux or builtin.os.tag == .macos);
 
 pub const AesKey = extern struct {

@@ -571,10 +571,10 @@ pub const P256 = struct {
         p2: P256,
         s2_: [32]u8,
         endian: std.builtin.Endian,
-        pc2_affine_cached: ?*const [9]AffineCoordinates,
-        pc2_w7_table: ?*const nistz_base.TableRows,
     ) IdentityElementError!P256 {
-        return mulDoubleBaseVerify(p1, s1_, p2, s2_, endian, pc2_affine_cached, pc2_w7_table);
+        // Match the std.crypto curve interface. Cached verification callers
+        // use mulDoubleBaseVerify directly with its explicit cache arguments.
+        return mulDoubleBaseVerify(p1, s1_, p2, s2_, endian, null, null);
     }
 };
 

@@ -91,7 +91,8 @@ test "x25519 comb recoverPublicKey matches std" {
     var n: u32 = 0;
     while (n < 64) : (n += 1) {
         std.crypto.hash.sha2.Sha256.hash(std.mem.asBytes(&n), &seed, .{});
-        const expected = try X25519.recoverPublicKey(seed);
+        const result = X25519.recoverPublicKey(seed);
+        const expected = if (comptime @typeInfo(@TypeOf(result)) == .error_union) try result else result;
         const got = recoverPublicKey(seed);
         try testing.expectEqualSlices(u8, &expected, &got);
     }
@@ -100,6 +101,7 @@ test "x25519 comb recoverPublicKey matches std" {
 test "x25519 comb matches std rfc7748 vector" {
     const X25519 = std.crypto.dh.X25519;
     const seed = [32]u8{ 0xa5, 0x46, 0xe3, 0x6b, 0xf0, 0x52, 0x7c, 0x9d, 0x3b, 0x16, 0x15, 0x4b, 0x82, 0x46, 0x5e, 0xdd, 0x62, 0x14, 0x4c, 0x0a, 0xc1, 0xfc, 0x5a, 0x18, 0x50, 0x6a, 0x22, 0x44, 0xba, 0x44, 0x9a, 0xc4 };
-    const expected = try X25519.recoverPublicKey(seed);
+    const result = X25519.recoverPublicKey(seed);
+    const expected = if (comptime @typeInfo(@TypeOf(result)) == .error_union) try result else result;
     try testing.expectEqualSlices(u8, &expected, &recoverPublicKey(seed));
 }

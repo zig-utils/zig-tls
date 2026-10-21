@@ -728,3 +728,37 @@ test "nonblock decrypt returns authentication errors" {
 
     try testing.expectError(error.TlsBadRecordMac, conn.decrypt(&ciphertext, &cleartext_buf));
 }
+
+test "nonblock decrypt accepts fragmented padded TLS 1.3 SMTP records" {
+    const data13 = @import("testdata/tls13.zig");
+    const content = "EHLO smtp-out.amazonses.com\r\n";
+    const inner_len = content.len + 1 + 16;
+    var encrypted: [record.header_len + inner_len + 16]u8 = undefined;
+    encrypted[0..record.header_len].* = record.header(.application_data, inner_len + 16);
+    const inner = encrypted[record.header_len..][0..inner_len];
+    @memcpy(inner[0..content.len], content);
+    inner[content.len] = @backingInt(proto.ContentType.application_data);
+    @memset(inner[content.len + 1 ..], 0);
+    std.crypto.aead.aes_gcm.Aes256Gcm.encrypt(
+        inner,
+        encrypted[record.header_len + inner_len ..][0..16],
+        inner,
+        encrypted[0..record.header_len],
+        data13.client_application_iv,
+        data13.client_application_key,
+    );
+    _, const server_cipher = cipher.testCiphers();
+    var conn = NonBlock.init(server_cipher);
+    // The application buffer need only hold CONTENT, not the peer's padding.
+    var clear: [content.len]u8 = undefined;
+    for (1..encrypted.len) |split| {
+        const partial = try conn.decrypt(encrypted[0..split], &clear);
+        try testing.expectEqual(0, partial.ciphertext_pos);
+        try testing.expectEqual(0, partial.cleartext.len);
+        try testing.expect(!partial.closed);
+    }
+    const result = try conn.decrypt(&encrypted, &clear);
+    try testing.expectEqual(encrypted.len, result.ciphertext_pos);
+    try testing.expectEqualSlices(u8, content, result.cleartext);
+    try testing.expect(!result.closed);
+}

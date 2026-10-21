@@ -16,6 +16,21 @@ const proto = @import("protocol.zig");
 const csprng = @import("random.zig").csprng;
 const aes_gcm_cached = @import("aes_gcm_cached.zig");
 
+/// RFC 8446 section 5.2: scan backwards past zero padding to the inner
+/// content type. The content itself may end in zero bytes and must survive.
+fn decodeInnerPlaintext(inner: []u8) !struct { proto.ContentType, []u8 } {
+    var end = inner.len;
+    while (end > 0 and inner[end - 1] == 0) : (end -= 1) {}
+    if (end == 0) return error.TlsUnexpectedMessage;
+    const kind: proto.ContentType = @fromBackingInt(@intCast(inner[end - 1]));
+    switch (kind) {
+        .application_data, .handshake, .alert => {},
+        else => return error.TlsUnexpectedMessage,
+    }
+    if (end - 1 > max_cleartext_len) return error.TlsRecordOverflow;
+    return .{ kind, inner[0 .. end - 1] };
+}
+
 // tls 1.2 cbc cipher types
 const CbcAes128Sha1 = CbcType(crypto.core.aes.Aes128, Sha1);
 const CbcAes128Sha256 = CbcType(crypto.core.aes.Aes128, Sha256);
@@ -698,7 +713,7 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
             const overhead = auth_tag_len + 1;
             if (rec.payload.len < overhead) return error.TlsDecryptError;
             const ciphertext_len = rec.payload.len - auth_tag_len;
-            if (ciphertext_len > max_cleartext_len + 1) return error.TlsRecordOverflow;
+            if (rec.payload.len > max_ciphertext_len) return error.TlsRecordOverflow;
             if (buf.len < ciphertext_len) return error.TlsCipherNoSpaceLeft;
 
             const ciphertext = rec.payload[0..ciphertext_len];
@@ -713,18 +728,17 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
                 AeadType.decrypt(buf[0..ciphertext_len], ciphertext, auth_tag.*, rec.header, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
             }
 
-            // TLS 1.3 records from this stack place content type immediately after cleartext.
-            const content_type_idx = ciphertext_len - 1;
-            const cleartext = buf[0..content_type_idx];
-            const content_type: proto.ContentType = @fromBackingInt(@intCast(buf[content_type_idx]));
             self.decrypt_seq +%= 1;
-            return .{ content_type, cleartext };
+            return decodeInnerPlaintext(buf[0..ciphertext_len]);
         }
 
         /// Decrypt a full TLS 1.3 record buffer in place (header + payload).
         pub fn decryptRecordInPlace(self: *Self, record_buf: []u8) ![]const u8 {
             const overhead = auth_tag_len + 1;
+            if (record_buf.len < record.header_len) return error.TlsDecodeError;
             const payload_len = mem.readInt(u16, record_buf[3..5], .big);
+            if (payload_len > max_ciphertext_len) return error.TlsRecordOverflow;
+            if (record_buf.len != record.header_len + payload_len) return error.TlsDecodeError;
             const payload = record_buf[record.header_len..][0..payload_len];
             if (payload.len < overhead) return error.TlsDecryptError;
             const ciphertext_len = payload.len - auth_tag_len;
@@ -739,7 +753,8 @@ fn Aead13Type(comptime AeadType: type, comptime Hash: type) type {
                 AeadType.decrypt(ciphertext, ciphertext, auth_tag.*, ad, iv, self.decrypt_key) catch return error.TlsBadRecordMac;
             }
             self.decrypt_seq +%= 1;
-            return ciphertext[0 .. ciphertext_len - 1];
+            _, const content = try decodeInnerPlaintext(ciphertext);
+            return content;
         }
     };
 }
@@ -1314,4 +1329,80 @@ test testCiphers {
         try testing.expectEqualStrings(close_notify, cleartext);
         try testing.expectEqual(.alert, content_type);
     }
+}
+
+// Build a peer record independently of this library's unpadded record writer.
+// TLSInnerPlaintext is content || type || zero padding (RFC 8446 section 5.2).
+fn paddedTestRecord(comptime suite: CipherSuite, comptime Aead: type, buffer: []u8, content: []const u8, content_type: proto.ContentType, padding: usize) ![]u8 {
+    const secret: Transcript.Secret = .{ .client = &@as([64]u8, @splat(0x31)), .server = &@as([64]u8, @splat(0x72)) };
+    const client = try Cipher.initTls13(suite, secret, .client);
+    const state = @field(client, @tagName(suite));
+    const inner_len = content.len + 1 + padding;
+    const payload_len = inner_len + Aead.tag_length;
+    buffer[0..record.header_len].* = record.header(.application_data, payload_len);
+    const inner = buffer[record.header_len..][0..inner_len];
+    @memcpy(inner[0..content.len], content);
+    inner[content.len] = @backingInt(content_type);
+    @memset(inner[content.len + 1 ..], 0);
+    const tag = buffer[record.header_len + inner_len ..][0..Aead.tag_length];
+    Aead.encrypt(inner, tag, inner, buffer[0..record.header_len], state.encrypt_iv, state.encrypt_key);
+    return buffer[0 .. record.header_len + payload_len];
+}
+
+test "TLS 1.3 padded peer records retain content and type for every AEAD" {
+    const secret: Transcript.Secret = .{ .client = &@as([64]u8, @splat(0x31)), .server = &@as([64]u8, @splat(0x72)) };
+    inline for (.{
+        .{ CipherSuite.AES_128_GCM_SHA256, crypto.aead.aes_gcm.Aes128Gcm },
+        .{ CipherSuite.AES_256_GCM_SHA384, crypto.aead.aes_gcm.Aes256Gcm },
+        .{ CipherSuite.CHACHA20_POLY1305_SHA256, crypto.aead.chacha_poly.ChaCha20Poly1305 },
+        .{ CipherSuite.AEGIS_128L_SHA256, crypto.aead.aegis.Aegis128L },
+    }) |pair| {
+        for ([_]usize{ 0, 1, 16, 255 }) |padding| {
+            for ([_]proto.ContentType{ .application_data, .handshake, .alert }) |kind| {
+                const content = "EHLO smtp-out.amazonses.com\r\n\x00\x00";
+                var encrypted: [1024]u8 = undefined;
+                const rec = try paddedTestRecord(pair[0], pair[1], &encrypted, content, kind, padding);
+                var server = try Cipher.initTls13(pair[0], secret, .server);
+                var clear: [1024]u8 = undefined;
+                const actual_type, const actual_content = try server.decrypt(&clear, Record.init(rec));
+                try testing.expectEqual(kind, actual_type);
+                try testing.expectEqualSlices(u8, content, actual_content);
+
+                server = try Cipher.initTls13(pair[0], secret, .server);
+                const in_place = try server.decryptRecordInPlace(rec);
+                try testing.expectEqualSlices(u8, content, in_place);
+            }
+        }
+    }
+}
+
+test "TLS 1.3 inner plaintext rejects missing or invalid types and oversized content" {
+    var zeros: [256]u8 = @splat(0);
+    try testing.expectError(error.TlsUnexpectedMessage, decodeInnerPlaintext(&zeros));
+    try testing.expectError(error.TlsUnexpectedMessage, decodeInnerPlaintext(zeros[0..0]));
+    var invalid = [_]u8{ 1, 0, 0 };
+    try testing.expectError(error.TlsUnexpectedMessage, decodeInnerPlaintext(&invalid));
+    var empty_app = [_]u8{ @backingInt(proto.ContentType.application_data), 0, 0 };
+    const kind, const content = try decodeInnerPlaintext(&empty_app);
+    try testing.expectEqual(.application_data, kind);
+    try testing.expectEqual(0, content.len);
+
+    const secret: Transcript.Secret = .{ .client = &@as([64]u8, @splat(0x31)), .server = &@as([64]u8, @splat(0x72)) };
+    var large: [max_cleartext_len + 1]u8 = @splat(0x41);
+    var encrypted: [max_ciphertext_record_len + 1]u8 = undefined;
+    var clear: [max_ciphertext_record_len]u8 = undefined;
+    // Maximum legal record expansion: the content limit applies AFTER padding.
+    const rec = try paddedTestRecord(.AES_128_GCM_SHA256, crypto.aead.aes_gcm.Aes128Gcm, &encrypted, large[0..max_cleartext_len], .application_data, 239);
+    var server = try Cipher.initTls13(.AES_128_GCM_SHA256, secret, .server);
+    const actual_type, const actual = try server.decrypt(&clear, Record.init(rec));
+    try testing.expectEqual(.application_data, actual_type);
+    try testing.expectEqualSlices(u8, large[0..max_cleartext_len], actual);
+    server = try Cipher.initTls13(.AES_128_GCM_SHA256, secret, .server);
+    try testing.expectEqualSlices(u8, large[0..max_cleartext_len], try server.decryptRecordInPlace(rec));
+
+    const oversized = try paddedTestRecord(.AES_128_GCM_SHA256, crypto.aead.aes_gcm.Aes128Gcm, &encrypted, &large, .application_data, 0);
+    server = try Cipher.initTls13(.AES_128_GCM_SHA256, secret, .server);
+    try testing.expectError(error.TlsRecordOverflow, server.decrypt(&clear, Record.init(oversized)));
+    server = try Cipher.initTls13(.AES_128_GCM_SHA256, secret, .server);
+    try testing.expectError(error.TlsRecordOverflow, server.decryptRecordInPlace(oversized));
 }
