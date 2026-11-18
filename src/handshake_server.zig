@@ -1006,6 +1006,14 @@ pub const Handshake = struct {
         // This is needed because we don't know which TLS version will be used yet
         var tls13_cipher: CipherSuite = @fromBackingInt(@intCast(0));
         var tls12_cipher: CipherSuite = @fromBackingInt(@intCast(0));
+        // A TLS 1.2 suite names the certificate key it authenticates with.
+        // Picking ECDHE_RSA for an ECDSA key (or the reverse) produces a
+        // ServerKeyExchange the client rejects, so skip the suites this
+        // server's key cannot serve. Without a key there is nothing to match.
+        const server_auth: ?CipherSuite.Authentication = if (opt.auth) |auth|
+            CipherSuite.Authentication.ofScheme(auth.key.signature_scheme)
+        else
+            null;
         { // cipher suites
             const end_idx = try d.decode(u16) + d.idx;
 
@@ -1018,6 +1026,7 @@ pub const Handshake = struct {
                             tls13_cipher = cipher_suite;
                         }
                     } else if (cipher_suites.includes(cipher_suites.tls12, cipher_suite)) {
+                        if (server_auth != null and cipher_suite.authentication() != server_auth) continue;
                         if (@backingInt(tls12_cipher) == 0) {
                             tls12_cipher = cipher_suite;
                         }

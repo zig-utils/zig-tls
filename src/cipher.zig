@@ -1056,6 +1056,60 @@ pub const CipherSuite = enum(u16) {
         rsa,
     };
 
+    /// The kind of certificate key a TLS 1.2 suite signs or decrypts with.
+    pub const Authentication = enum {
+        rsa,
+        ecdsa,
+
+        /// The authentication a server key can provide, from its signature
+        /// scheme. Null for keys no TLS 1.2 suite here can use.
+        pub fn ofScheme(scheme: proto.SignatureScheme) ?Authentication {
+            return switch (scheme) {
+                .ecdsa_secp256r1_sha256,
+                .ecdsa_secp384r1_sha384,
+                .ecdsa_secp521r1_sha512,
+                .ecdsa_sha1,
+                => .ecdsa,
+                .rsa_pkcs1_sha256,
+                .rsa_pkcs1_sha384,
+                .rsa_pkcs1_sha512,
+                .rsa_pss_rsae_sha256,
+                .rsa_pss_rsae_sha384,
+                .rsa_pss_rsae_sha512,
+                .rsa_pss_pss_sha256,
+                .rsa_pss_pss_sha384,
+                .rsa_pss_pss_sha512,
+                .rsa_pkcs1_sha1,
+                => .rsa,
+                else => null,
+            };
+        }
+    };
+
+    /// The certificate key a TLS 1.2 suite requires. Null for TLS 1.3
+    /// suites, which leave the key type to the signature algorithm.
+    pub fn authentication(s: CipherSuite) ?Authentication {
+        return switch (s) {
+            .ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+            .ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+            .ECDHE_ECDSA_WITH_AES_256_CBC_SHA384,
+            .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            .ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+            => .ecdsa,
+            .ECDHE_RSA_WITH_AES_128_CBC_SHA,
+            .ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+            .ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+            .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            .ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            .RSA_WITH_AES_128_CBC_SHA,
+            .RSA_WITH_AES_128_CBC_SHA256,
+            => .rsa,
+            else => null,
+        };
+    }
+
     pub fn keyExchange(s: CipherSuite) KeyExchangeAlgorithm {
         return switch (s) {
             // Random premaster secret, encrypted with publich key from certificate.

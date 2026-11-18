@@ -227,6 +227,70 @@ test "0-RTT early data server decrypt" {
     try testing.expect(srv.done());
 }
 
+test "TLS 1.2 picks a suite the server's key can sign, not the client's first" {
+    // A TLS 1.2 client listing ECDHE_RSA ahead of ECDHE_ECDSA (BoringSSL's
+    // default order does) used to be handed ECDHE_RSA by a server holding an
+    // ECDSA key, and rejected the handshake as WRONG_CERTIFICATE_TYPE.
+    const testing = @import("std").testing;
+    const allocator = testing.allocator;
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIBfDCCASOgAwIBAgIUQLqOnCo7H/bJUF1Szr+llCjaUDQwCgYIKoZIzj0EAwIw
+        \\FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDYwODE2NDI0NVoXDTM2MDYwNTE2
+        \\NDI0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+        \\AQcDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4G20Q
+        \\q0dJ3jaRBz8MMglQClooPnY3Z3iNJKNTMFEwHQYDVR0OBBYEFKCBVZdchts7bXZB
+        \\ZWuL8eNAdz/YMB8GA1UdIwQYMBaAFKCBVZdchts7bXZBZWuL8eNAdz/YMA8GA1Ud
+        \\EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgcbi5sqviAW6/cB5IceGx2aBG
+        \\mURelDq3gDVCXdGXhuoCIHgffOqfX89M1r8Hax8HY7MACM+wnevA7UDIurNdCUUU
+        \\-----END CERTIFICATE-----
+    ;
+    const key_pem =
+        \\-----BEGIN EC PRIVATE KEY-----
+        \\MHcCAQEEIKpmzT0Wdz4OucLI2ZaHsBjBsSLW4rqsmjMoDhmegFKdoAoGCCqGSM49
+        \\AwEHoUQDQgAEn33K13S5Q8LcxDFMdsmKOFszNXyW7wOyxZfvDxbpa0k5uuzT9ex4
+        \\G20Qq0dJ3jaRBz8MMglQClooPnY3Z3iNJA==
+        \\-----END EC PRIVATE KEY-----
+    ;
+    var cert_key = try config.CertKeyPair.fromPem(allocator, cert_pem, key_pem);
+    defer cert_key.deinit(allocator);
+
+    const server_opt = config.Server{
+        .auth = &cert_key,
+        .min_version = .tls_1_2,
+        .max_version = .tls_1_2,
+    };
+    { // RSA listed first: the server takes the ECDSA suite after it.
+        var cli = nonblock.Client.init(.{
+            .host = "localhost",
+            .root_ca = .empty,
+            .insecure_skip_verify = true,
+            .cipher_suites = &[_]config.CipherSuite{
+                .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            },
+            .min_version = .tls_1_2,
+            .max_version = .tls_1_2,
+        });
+        var srv = nonblock.Server.init(server_opt);
+        try pumpNonblockHandshake(&cli, &srv);
+        try testing.expect(srv.done());
+        try testing.expectEqual(config.CipherSuite.ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, srv.inner.cipher_suite);
+    }
+    { // Only RSA suites: refuse in the handshake rather than sign wrongly.
+        var cli = nonblock.Client.init(.{
+            .host = "localhost",
+            .root_ca = .empty,
+            .insecure_skip_verify = true,
+            .cipher_suites = &[_]config.CipherSuite{.ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+            .min_version = .tls_1_2,
+            .max_version = .tls_1_2,
+        });
+        var srv = nonblock.Server.init(server_opt);
+        try testing.expectError(error.TlsNoSupportedCiphers, pumpNonblockHandshake(&cli, &srv));
+    }
+}
+
 test "interop: TLS 1.3 cert handshake with OCSP staple" {
     const testing = @import("std").testing;
     const allocator = testing.allocator;
