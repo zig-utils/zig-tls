@@ -81,7 +81,8 @@ pub const CertKeyPair = struct {
         key_path: []const u8,
     ) !CertKeyPair {
         var bundle: cert.Bundle = .empty;
-        try bundle.addCertsFromFilePath(allocator, dir, cert_path);
+        errdefer bundle.deinit(allocator);
+        try bundle.addCertsFromFilePath(allocator, io, Io.Clock.real.now(io), dir, cert_path);
 
         const key_file = try dir.openFile(io, key_path, .{});
         defer key_file.close(io);
@@ -309,24 +310,38 @@ pub const cert = struct {
     // forms valid trust chain.
     pub const Bundle = crypto.Certificate.Bundle;
 
-    pub fn fromFilePath(allocator: mem.Allocator, dir: std.fs.Dir, path: []const u8) !Bundle {
+    pub fn fromFilePath(allocator: mem.Allocator, dir: Io.Dir, path: []const u8) !Bundle {
+        const io = Io.Threaded.global_single_threaded.io();
         var bundle: Bundle = .empty;
-        try bundle.addCertsFromFilePath(allocator, dir, path);
+        errdefer bundle.deinit(allocator);
+        try bundle.addCertsFromFilePath(allocator, io, Io.Clock.real.now(io), dir, path);
         return bundle;
     }
 
     pub fn fromFilePathAbsolute(allocator: mem.Allocator, path: []const u8) !Bundle {
+        const io = Io.Threaded.global_single_threaded.io();
         var bundle: Bundle = .empty;
-        try bundle.addCertsFromFilePathAbsolute(allocator, path);
+        errdefer bundle.deinit(allocator);
+        try bundle.addCertsFromFilePathAbsolute(allocator, io, Io.Clock.real.now(io), path);
         return bundle;
     }
 
     pub fn fromSystem(allocator: mem.Allocator) !Bundle {
+        const io = Io.Threaded.global_single_threaded.io();
         var bundle: Bundle = .empty;
-        try bundle.rescan(allocator);
+        errdefer bundle.deinit(allocator);
+        try bundle.rescan(allocator, io, Io.Clock.real.now(io));
         return bundle;
     }
 };
+
+test "load the system certificate bundle" {
+    const os = @import("builtin").os.tag;
+    if (os != .linux and os != .macos) return error.SkipZigTest;
+    var bundle = try cert.fromSystem(std.testing.allocator);
+    defer bundle.deinit(std.testing.allocator);
+    try std.testing.expect(bundle.bytes.items.len != 0);
+}
 
 /// Max stapled OCSP response size attached to the leaf Certificate entry.
 pub const max_ocsp_staple_len = 8192;
